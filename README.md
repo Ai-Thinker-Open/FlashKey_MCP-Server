@@ -1,80 +1,108 @@
-# flashkey-mcp
+# 🔑 flashkey-mcp
 
-> FlashKey FK-01 的 AI 插件——让 AI Agent 通过 MCP 协议控制烧录/调试硬件。
+> FlashKey FK-01 的 MCP 通信库 — 让 AI Agent 直接控制 USB 烧录调试器。
 
-`pip install flashkey-mcp` 一条命令，AI Agent 就能发现、连接、控制 FlashKey 硬件。
-
----
-
-## 这是什么
-
-FlashKey FK-01 是一款 USB 智能烧录调试一体机。这个 Python 包是它的 **AI 控制接口**——封装成 MCP Server，让 Hermes / Claude / Cursor 等 AI 工具能直接操作物理硬件。
-
-### 用户看到的
-
-```
-用户说："帮我烧录这块 BL618"
-
-Agent 自动：
-  1. 发现 FlashKey 设备（USB 串口）
-  2. 连接 + 握手认证
-  3. 拉高 BOOT → 脉冲 RST → 进入烧录模式
-  4. 通过串口烧录固件
-  
-全程用户只说了一句话。
-```
-
----
-
-## 快速安装
+## 安装
 
 ```bash
 pip install flashkey-mcp
+# 依赖: Python ≥ 3.10, pyserial, mcp (modelcontextprotocol/python-sdk)
 ```
 
-在 Hermes config.yaml 添加：
+## 快速开始
+
+### Python API
+
+```python
+from flashkey_mcp import FlashKey
+
+# 自动发现 FlashKey 设备
+fk = FlashKey()
+
+# 握手认证
+if fk.commands.handshake():
+    print("认证成功 ✅")
+
+# 查询状态
+print(fk.commands.get_status())
+
+# 控制目标芯片
+fk.commands.boot_set(True)   # BOOT 拉高
+fk.commands.rst_pulse(50)    # RST 脉冲 50ms
+
+fk.close()
+```
+
+### MCP Server（AI Agent 集成）
+
+```bash
+# 启动 MCP StdioServer
+flashkey-mcp
+# 或: python -m flashkey_mcp.server
+```
+
+### Hermes Agent 配置
+
+编辑 `~/.hermes/config.yaml`：
 
 ```yaml
 mcp_servers:
   flashkey:
     command: "flashkey-mcp"
-    args: []
+    # 或使用 pip install -e 本地开发模式时：
+    # command: "python"
+    # args: ["-m", "flashkey_mcp.server"]
 ```
 
-重启 Hermes，即可使用。
+重启 Hermes 后，AI 即可使用以下 tools：
 
----
+| Tool | 功能 | 需要认证 |
+|:-----|:-----|:--------:|
+| `flashkey_ping` | 检测连通性 | ❌ |
+| `flashkey_handshake` | 握手认证 | ❌ |
+| `flashkey_auth_status` | 查询认证状态 | ❌ |
+| `flashkey_boot_set/get` | BOOT 引脚控制 | ✅ |
+| `flashkey_rst_set/get/pulse` | RST 引脚控制 | ✅ |
+| `flashkey_v5v_set/get` | 5V 电源控制 | ✅ |
+| `flashkey_v3v3_set/get` | 3.3V 电源控制 | ✅ |
+| `flashkey_get_version/uid/status` | 设备信息查询 | ✅ |
+| `flashkey_enter_bootloader` | 一键进入烧录模式 | ✅ |
 
-## 核心工具
+## 通信协议
 
-| 分组 | 工具 | 做什么 |
-|------|------|--------|
-| **发现** | `flashkey_list_devices` | 扫描 USB 找出 FlashKey 串口 |
-| **连接** | `flashkey_connect` / `flashkey_disconnect` | 打开/关闭串口 |
-| **认证** | `flashkey_ping` / `flashkey_handshake` | 验真 + Challenge-Response 握手 |
-| **GPIO** | `boot_set` / `boot_get` / `rst_set` / `rst_get` / `rst_pulse` | 控制目标板 BOOT/RST 引脚 |
-| **电源** | `v5v_set` / `v5v_get` / `v3v3_set` / `v3v3_get` | 控制目标板 5V/3.3V 供电 |
-| **一键烧录** | `flashkey_enter_bootloader(target)` | 传入 bl618/esp32/stm32 自动执行烧录时序 |
-| **串口透传** | `serial_open` / `serial_send` / `serial_read` / `serial_close` | 通过 CH340C 与目标板通信 |
+帧格式：`SOF=0x7E | LEN(=data_len+2) | CMD | DATA[N] | CRC-8(0x31) | EOF=0x7F`
 
-完整清单见 [docs/TOOLS.md](docs/TOOLS.md)。
+支持 15 条命令：PING、CHALLENGE、RESPONSE、AUTH_STATUS、BOOT_SET/GET、RST_SET/GET/PULSE、V5V_SET/GET、V3V3_SET/GET、GET_VERSION、GET_UID、GET_STATUS。
 
----
-
-## 设计文档
-
-- [DESIGN.md](docs/DESIGN.md) — 架构设计 + 流程图
-- [TOOLS.md](docs/TOOLS.md) — 22 个工具完整签名
-- [PROTOCOL.md](docs/PROTOCOL.md) — USB 通讯协议
-
----
-
-## 项目状态
+## 目录结构
 
 ```
-硬件设计 ───→ 待打样验证
-固件开发 ───→ 未开始
-MCP Server ─→ 代码已写，待联调
+flashkey-mcp/
+├── pyproject.toml
+├── README.md
+├── src/flashkey_mcp/
+│   ├── __init__.py      # 包入口 + FlashKey 类
+│   ├── transport.py     # USB CDC 串口发现与通信
+│   ├── protocol.py      # 帧协议 + CRC-8 + 状态机
+│   ├── auth.py          # Challenge-Response 认证算法
+│   ├── commands.py      # 15 条命令封装
+│   └── server.py        # MCP StdioServer
+└── tests/
+    ├── test_auth.py
+    ├── test_commands.py
+    └── test_s1_handshake.py
 ```
 
-当前为 **设计阶段**，代码基于硬件需求文档编写，尚未在真实硬件上验证。
+## 开发
+
+```bash
+git clone --recurse-submodules git@github.com:Ai-Thinker-Open/FlashKey.git
+cd FlashKey/flashkey-mcp
+python3.11 -m venv .venv311
+source .venv311/bin/activate
+pip install -e .
+```
+
+## 许可证
+
+MIT · Ai-Thinker 安信可

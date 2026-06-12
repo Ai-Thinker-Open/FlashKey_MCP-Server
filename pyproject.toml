@@ -1,44 +1,28 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashkey-mcp"
 version = "0.1.0"
-description = "MCP Server for FlashKey FK-01 USB programmer — AI-controlled BOOT/RST/power"
-readme = "README.md"
-license = {text = "MIT"}
-authors = [
-    {name = "Ai-Thinker", email = "developer@aithinker.com"},
-]
+description = "FlashKey FK-01 MCP communication library"
 requires-python = ">=3.10"
-keywords = ["flashkey", "programmer", "embedded", "usb", "mcp", "flash"]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Software Development :: Embedded Systems",
-]
-
 dependencies = [
     "pyserial>=3.5",
-    "mcp>=1.0.0",
+    "mcp>=1.0",
 ]
 
-[project.urls]
-Homepage = "https://github.com/Ai-Thinker-Open/flashkey-mcp"
-Repository = "https://github.com/Ai-Thinker-Open/flashkey-mcp"
+[project.license]
+text = "MIT"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [project.scripts]
 flashkey-mcp = "flashkey_mcp.server:main"
-
-[tool.setuptools]
-package-dir = {"" = "."}
-packages = ["flashkey_mcp"]
 
 [tool.setuptools.package-data]
 flashkey_mcp = ["py.typed"]
