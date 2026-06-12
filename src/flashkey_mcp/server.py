@@ -22,11 +22,15 @@ logger = logging.getLogger(__name__)
 
 _fk: FlashKey | None = None
 _authed: bool = False
+_fk_lock: Any = None  # lazily created threading.Lock
 
 
 def _get_device() -> FlashKey:
     """Return the singleton ``FlashKey`` instance, connecting on first call."""
-    global _fk
+    global _fk, _fk_lock
+    if _fk_lock is None:
+        import threading
+        _fk_lock = threading.Lock()
     if _fk is None:
         if find_port() is None:
             raise RuntimeError(
@@ -45,10 +49,40 @@ def _require_authed() -> None:
         )
 
 
+def _clear_auth() -> None:
+    """Clear the authentication flag (e.g. on connection loss)."""
+    global _authed
+    _authed = False
+
+
+def _check_connection() -> bool:
+    """Check if the device connection is still alive by testing the transport.
+
+    Returns ``True`` if the device responds to a PING, ``False`` otherwise.
+    """
+    global _fk
+    if _fk is None:
+        return False
+    try:
+        _fk.commands.ping()
+        return True
+    except Exception:
+        # Connection lost — clear auth and close transport
+        _clear_auth()
+        if _fk is not None:
+            try:
+                _fk.close()
+            except Exception:
+                pass
+        _fk = None
+        return False
+
+
 # ── Tool implementations ───────────────────────────────────────────────
 
 def tool_ping() -> dict[str, Any]:
-    """Ping the device and return its magic string."""
+    """Ping the device and return its magic string. Requires prior authentication."""
+    _require_authed()
     fk = _get_device()
     return fk.commands.ping()
 
@@ -79,7 +113,8 @@ def tool_handshake(key: str | None = None) -> dict[str, bool]:
 
 
 def tool_auth_status() -> dict[str, bool]:
-    """Query the current authentication state on the device."""
+    """Query the current authentication state on the device. Requires prior authentication."""
+    _require_authed()
     fk = _get_device()
     return fk.commands.auth_status()
 
@@ -192,18 +227,37 @@ def tool_enter_bootloader() -> dict[str, str]:
 
 def _wrap_tool(fn: Any) -> Any:
     """Wrap a tool function so that common errors return JSON-able messages
-    instead of crashing the MCP server."""
+    instead of crashing the MCP server.
+
+    Also monitors connection health: if a transport error occurs,
+    the authentication flag is cleared and the connection is reset.
+    """
     import functools
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            return result
         except RuntimeError as exc:
             # Handles "not found" and "not authenticated"
             return {"error": str(exc)}
-        except TimeoutError as exc:
-            return {"error": f"Device communication timeout: {exc}"}
+        except (TimeoutError, OSError, IOError) as exc:
+            # Connection lost — clear auth and reset transport
+            global _fk
+            _clear_auth()
+            if _fk is not None:
+                try:
+                    _fk.close()
+                except Exception:
+                    pass
+            _fk = None
+            return {
+                "error": (
+                    "Device connection lost — authentication cleared. "
+                    f"Please reconnect and call flashkey_handshake again. ({exc})"
+                )
+            }
         except Exception as exc:
             logger.exception("Unhandled error in tool %s", fn.__name__)
             return {"error": f"Internal error: {exc}"}
@@ -225,7 +279,7 @@ mcp = FastMCP(
 mcp.add_tool(
     _wrap_tool(tool_ping),
     name="flashkey_ping",
-    description="Ping the FlashKey device and return its magic identifier string.",
+    description="Ping the FlashKey device and return its magic identifier string. Requires prior authentication.",
 )
 
 mcp.add_tool(
@@ -240,7 +294,7 @@ mcp.add_tool(
 mcp.add_tool(
     _wrap_tool(tool_auth_status),
     name="flashkey_auth_status",
-    description="Query whether the device is currently authenticated.",
+    description="Query whether the device is currently authenticated. Requires prior authentication.",
 )
 
 mcp.add_tool(

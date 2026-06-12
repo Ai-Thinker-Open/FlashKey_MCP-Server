@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """FlashKey FK-01 S1 test: PING + Auth handshake + verify PB11 trigger"""
+from flashkey_mcp.colors import green, red, yellow, cyan, gray, bold, bold_yellow
 import serial, time, os
 
 def crc8(data):
