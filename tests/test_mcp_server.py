@@ -28,7 +28,6 @@ LATEST_PROTOCOL_VERSION = "2025-11-25"
 
 EXPECTED_TOOLS = [
     "flashkey_ping",
-    "flashkey_handshake",
     "flashkey_auth_status",
     "flashkey_boot_set",
     "flashkey_boot_get",
@@ -250,7 +249,7 @@ def test_jsonrpc_initialize() -> None:
 # ── Test 3: tools/list ──────────────────────────────────────────────────
 
 def test_tools_list() -> None:
-    """After initialize, tools/list must return exactly 16 tools."""
+    """After initialize, tools/list must return exactly 15 tools."""
     proc = start_server()
     try:
         initialize_server(proc)
@@ -264,7 +263,7 @@ def test_tools_list() -> None:
         tools = r["tools"]
 
         assert isinstance(tools, list), f"tools is not a list: {type(tools)}"
-        assert len(tools) == 16, f"Expected 16 tools, got {len(tools)}"
+        assert len(tools) == 15, f"Expected 15 tools, got {len(tools)}"
 
         # Verify each tool has name and description
         for t in tools:
@@ -461,7 +460,7 @@ def run_all() -> None:
         ("Server Import", test_server_import),
         ("Server has main()", test_server_has_main),
         ("JSON-RPC Initialize", test_jsonrpc_initialize),
-        ("tools/list (16 tools)", test_tools_list),
+        ("tools/list (15 tools)", test_tools_list),
         ("Uninitialized Rejected", test_uninitialized_rejected),
         ("Auth Middleware (no HW)", test_auth_middleware_no_hardware),
         ("Garbage Input", test_garbage_input),

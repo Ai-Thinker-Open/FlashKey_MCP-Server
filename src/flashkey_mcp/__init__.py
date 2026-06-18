@@ -28,11 +28,12 @@ __all__ = [
 class FlashKey:
     """High-level interface for FlashKey FK-01 device."""
 
-    def __init__(self, port: str | None = None, timeout: float = 3):
+    def __init__(self, port: str | None = None, timeout: float = 0.1):
         if port is None:
-            port = find_port()
-            if port is None:
+            info = find_port()
+            if info is None:
                 raise RuntimeError("No FlashKey device found")
+            port = info["port"]
         self.transport = FlashKeyTransport(port, timeout)
         self.commands = FlashKeyCommands(self.transport)
 

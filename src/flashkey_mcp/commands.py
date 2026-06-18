@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 # ── Command bytes (host → device) ──────────────────────────────────────
 CMD_PING: int = 0x01
+CMD_HELLO: int = 0x02
 CMD_CHALLENGE: int = 0x10
 CMD_RESPONSE: int = 0x11
 CMD_AUTH_STATUS: int = 0x12
@@ -94,18 +95,17 @@ class FlashKeyCommands:
             TimeoutError: If no valid response is received in time.
         """
         frame = build_frame(cmd, data)
-        self._transport.write(frame)
-
-        parser = FrameParser()
-        deadline = time.time() + read_timeout
-
-        while time.time() < deadline:
-            byte_data = self._transport.read(1)
-            if not byte_data:
-                break
-            result = parser.feed(byte_data[0])
-            if result is not None:
-                return result  # (cmd, data)
+        with self._transport._lock:
+            self._transport.write(frame)
+            parser = FrameParser()
+            deadline = time.time() + read_timeout
+            while time.time() < deadline:
+                byte_data = self._transport.read(1)
+                if not byte_data:
+                    break
+                result = parser.feed(byte_data[0])
+                if result is not None:
+                    return result  # (cmd, data)
 
         raise TimeoutError(
             f"No response received for command 0x{cmd:02X}"
@@ -125,7 +125,7 @@ class FlashKeyCommands:
 
     # ── Communication commands (3) ─────────────────────────────────────────
 
-    def ping(self) -> dict:
+    def ping(self, read_timeout: float = 1.0) -> dict:
         """Send a PING and expect a PONG.
 
         Returns:
@@ -134,7 +134,7 @@ class FlashKeyCommands:
         Raises:
             TimeoutError: If no PONG is received.
         """
-        _rsp_cmd, data = self._transceive(CMD_PING)
+        _rsp_cmd, data = self._transceive(CMD_PING, read_timeout=read_timeout)
         magic = data[:6].decode("ascii", errors="replace")
         return {"ok": True, "magic": magic}
 

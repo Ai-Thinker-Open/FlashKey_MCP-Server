@@ -59,7 +59,6 @@ mcp_servers:
 | Tool | 功能 | 需要认证 |
 |:-----|:-----|:--------:|
 | `flashkey_ping` | 检测连通性 | ❌ |
-| `flashkey_handshake` | 握手认证 | ❌ |
 | `flashkey_auth_status` | 查询认证状态 | ❌ |
 | `flashkey_boot_set/get` | BOOT 引脚控制 | ✅ |
 | `flashkey_rst_set/get/pulse` | RST 引脚控制 | ✅ |

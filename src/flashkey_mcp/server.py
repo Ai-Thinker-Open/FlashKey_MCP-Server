@@ -1,51 +1,56 @@
-"""FlashKey FK-01 MCP StdioServer.
+"""FlashKey FK-01 MCP HTTP SSE Server.
 
-Registers 16 tools covering all FlashKeyCommands plus a convenience
-``flashkey_enter_bootloader`` tool.
+Registers 15 tools covering all FlashKeyCommands plus a convenience
+``flashkey_enter_bootloader`` tool (handshake is automatic via HELLO).
 
 Usage::
 
-    python -m flashkey_mcp.server
+    flashkey-mcp
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
+import threading
+import time
 from typing import Any
 
 from flashkey_mcp import FlashKey, find_port
-from flashkey_mcp.commands import STATUS_BIT_BOOT
+from flashkey_mcp.commands import CMD_HELLO, STATUS_BIT_BOOT
+from flashkey_mcp.protocol import FrameParser
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PORT = 8100
 
 # ── Singleton / lazy-connection helpers ────────────────────────────────
 
 _fk: FlashKey | None = None
 _authed: bool = False
-_fk_lock: Any = None  # lazily created threading.Lock
+_fk_lock: threading.RLock = threading.RLock()
 
 
 def _get_device() -> FlashKey:
     """Return the singleton ``FlashKey`` instance, connecting on first call."""
-    global _fk, _fk_lock
-    if _fk_lock is None:
-        import threading
-        _fk_lock = threading.Lock()
-    if _fk is None:
-        if find_port() is None:
-            raise RuntimeError(
-                "No FlashKey device found. "
-                "Please connect the FK-01 hardware and try again."
-            )
-        _fk = FlashKey()
-    return _fk
+    global _fk
+    with _fk_lock:
+        if _fk is None:
+            info = find_port()
+            if info is None:
+                raise RuntimeError(
+                    "No FlashKey device found. "
+                    "Please connect the FK-01 hardware and try again."
+                )
+            _fk = FlashKey(port=info["port"])
+        return _fk
 
 
 def _require_authed() -> None:
     """Raise ``RuntimeError`` if the device has not completed auth handshake."""
     if not _authed:
         raise RuntimeError(
-            "Not authenticated — call flashkey_handshake first."
+            "Not authenticated — device handshake not completed."
         )
 
 
@@ -67,7 +72,6 @@ def _check_connection() -> bool:
         _fk.commands.ping()
         return True
     except Exception:
-        # Connection lost — clear auth and close transport
         _clear_auth()
         if _fk is not None:
             try:
@@ -85,31 +89,6 @@ def tool_ping() -> dict[str, Any]:
     _require_authed()
     fk = _get_device()
     return fk.commands.ping()
-
-
-def tool_handshake(key: str | None = None) -> dict[str, bool]:
-    """Perform Challenge-Response authentication handshake.
-
-    Args:
-        key: Optional 8-byte key as a hex string (16 hex chars).
-             Defaults to built-in standard key.
-    """
-    global _authed
-    fk = _get_device()
-    key_bytes: bytes | None = None
-    if key is not None:
-        try:
-            key_bytes = bytes.fromhex(key)
-        except ValueError:
-            raise ValueError(
-                "Invalid key format — expected 16-character hex string."
-            )
-        if len(key_bytes) != 8:
-            raise ValueError(
-                f"Key must be 8 bytes (16 hex chars), got {len(key_bytes)} bytes."
-            )
-    _authed = fk.commands.handshake(key_bytes)
-    return {"authed": _authed}
 
 
 def tool_auth_status() -> dict[str, bool]:
@@ -192,7 +171,7 @@ def tool_v3v3_get() -> dict[str, bool]:
 
 
 def tool_get_version() -> dict[str, str]:
-    """Read the firmware version string (e.g. \"1.0.0\")."""
+    """Read the firmware version string (e.g. "1.0.0")."""
     _require_authed()
     fk = _get_device()
     return fk.commands.get_version()
@@ -240,10 +219,8 @@ def _wrap_tool(fn: Any) -> Any:
             result = fn(*args, **kwargs)
             return result
         except RuntimeError as exc:
-            # Handles "not found" and "not authenticated"
             return {"error": str(exc)}
         except (TimeoutError, OSError, IOError) as exc:
-            # Connection lost — clear auth and reset transport
             global _fk
             _clear_auth()
             if _fk is not None:
@@ -255,7 +232,7 @@ def _wrap_tool(fn: Any) -> Any:
             return {
                 "error": (
                     "Device connection lost — authentication cleared. "
-                    f"Please reconnect and call flashkey_handshake again. ({exc})"
+                    f"Please reconnect. ({exc})"
                 )
             }
         except Exception as exc:
@@ -274,122 +251,181 @@ mcp = FastMCP(
     instructions="MCP server for FlashKey FK-01 hardware debug tool.",
 )
 
-# Register all 16 tools with descriptions and parameter schemas.
+# Register all 15 tools with descriptions and parameter schemas.
 
-mcp.add_tool(
-    _wrap_tool(tool_ping),
-    name="flashkey_ping",
-    description="Ping the FlashKey device and return its magic identifier string. Requires prior authentication.",
-)
+mcp.add_tool(_wrap_tool(tool_ping), name="flashkey_ping",
+    description="Ping the FlashKey device and return its magic identifier string. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_auth_status), name="flashkey_auth_status",
+    description="Query whether the device is currently authenticated. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_boot_set), name="flashkey_boot_set",
+    description="Set the BOOT pin high (True) or low (False). Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_boot_get), name="flashkey_boot_get",
+    description="Read the current BOOT pin state. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_rst_set), name="flashkey_rst_set",
+    description="Set the RST (reset) pin high (True) or low (False). Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_rst_get), name="flashkey_rst_get",
+    description="Read the current RST pin state. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_rst_pulse), name="flashkey_rst_pulse",
+    description="Generate a pulse on the RST pin with configurable width in ms. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_v5v_set), name="flashkey_v5v_set",
+    description="Enable or disable the 5V power output. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_v5v_get), name="flashkey_v5v_get",
+    description="Read the current 5V power state. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_v3v3_set), name="flashkey_v3v3_set",
+    description="Enable or disable the 3.3V power output. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_v3v3_get), name="flashkey_v3v3_get",
+    description="Read the current 3.3V power state. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_get_version), name="flashkey_get_version",
+    description="Read the firmware version string (e.g. '1.0.0'). Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_get_uid), name="flashkey_get_uid",
+    description="Read the device unique identifier as a hex string. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_get_status), name="flashkey_get_status",
+    description="Read the combined device status including boot, rst, v5v, v3v3 pin states and authentication status. Requires prior authentication.")
+mcp.add_tool(_wrap_tool(tool_enter_bootloader), name="flashkey_enter_bootloader",
+    description="Set BOOT pin high then pulse RST to enter the bootloader. Equivalent to boot_set(True) + rst_pulse(). Requires prior authentication.")
 
-mcp.add_tool(
-    _wrap_tool(tool_handshake),
-    name="flashkey_handshake",
-    description=(
-        "Perform Challenge-Response authentication handshake with the device. "
-        "Must be called before any GPIO/power/query command."
-    ),
-)
 
-mcp.add_tool(
-    _wrap_tool(tool_auth_status),
-    name="flashkey_auth_status",
-    description="Query whether the device is currently authenticated. Requires prior authentication.",
-)
+# ── HELLO-based handshake helpers ──────────────────────────────────────
 
-mcp.add_tool(
-    _wrap_tool(tool_boot_set),
-    name="flashkey_boot_set",
-    description="Set the BOOT pin high (True) or low (False). Requires prior authentication.",
-)
 
-mcp.add_tool(
-    _wrap_tool(tool_boot_get),
-    name="flashkey_boot_get",
-    description="Read the current BOOT pin state. Requires prior authentication.",
-)
+def _wait_for_hello(fk: "FlashKey", timeout: float = 12) -> bool:
+    """Listen for HELLO frames and perform challenge-response handshake.
 
-mcp.add_tool(
-    _wrap_tool(tool_rst_set),
-    name="flashkey_rst_set",
-    description="Set the RST (reset) pin high (True) or low (False). Requires prior authentication.",
-)
+    Args:
+        fk: Open FlashKey device instance.
+        timeout: Max seconds to wait for a HELLO frame.
 
-mcp.add_tool(
-    _wrap_tool(tool_rst_get),
-    name="flashkey_rst_get",
-    description="Read the current RST pin state. Requires prior authentication.",
-)
+    Returns:
+        ``True`` if handshake succeeded, ``False`` otherwise.
+    """
+    parser = FrameParser()
+    fk.transport._ser.reset_input_buffer()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        byte_data = fk.transport.read(1)
+        if byte_data:
+            result = parser.feed(byte_data[0])
+            if result is not None:
+                cmd, _data = result
+                if cmd == CMD_HELLO:
+                    try:
+                        if fk.commands.handshake():
+                            return True
+                    except Exception:
+                        pass
+    return False
 
-mcp.add_tool(
-    _wrap_tool(tool_rst_pulse),
-    name="flashkey_rst_pulse",
-    description=(
-        "Generate a pulse on the RST pin with configurable width in ms. "
-        "Requires prior authentication."
-    ),
-)
 
-mcp.add_tool(
-    _wrap_tool(tool_v5v_set),
-    name="flashkey_v5v_set",
-    description="Enable or disable the 5V power output. Requires prior authentication.",
-)
+def _try_reconnect() -> None:
+    """Re-detect the FlashKey device and re-authenticate (called from keepalive)."""
+    global _fk, _authed
+    try:
+        new_info = find_port()
+        if new_info:
+            new_port = new_info["port"]
+            logger.info("Reconnecting on port %s (%s %s)",
+                         new_port, new_info.get("vendor", ""), new_info.get("model", ""))
+            new_fk = FlashKey(port=new_port, timeout=0.1)
+            _authed = _wait_for_hello(new_fk)
+            if not _authed:
+                _authed = new_fk.commands.handshake()
+            with _fk_lock:
+                if _authed:
+                    # Close old connection before replacing
+                    if _fk is not None:
+                        try:
+                            _fk.close()
+                        except Exception:
+                            pass
+                    _fk = new_fk
+                    logger.info("Reconnect + handshake succeeded")
+                else:
+                    new_fk.close()
+                    logger.warning("Reconnect failed to authenticate")
+        else:
+            logger.warning("No FlashKey device found on any port")
+    except Exception as exc:
+        logger.warning("Reconnect failed: %s", exc)
 
-mcp.add_tool(
-    _wrap_tool(tool_v5v_get),
-    name="flashkey_v5v_get",
-    description="Read the current 5V power state. Requires prior authentication.",
-)
 
-mcp.add_tool(
-    _wrap_tool(tool_v3v3_set),
-    name="flashkey_v3v3_set",
-    description="Enable or disable the 3.3V power output. Requires prior authentication.",
-)
-
-mcp.add_tool(
-    _wrap_tool(tool_v3v3_get),
-    name="flashkey_v3v3_get",
-    description="Read the current 3.3V power state. Requires prior authentication.",
-)
-
-mcp.add_tool(
-    _wrap_tool(tool_get_version),
-    name="flashkey_get_version",
-    description="Read the firmware version string (e.g. '1.0.0'). Requires prior authentication.",
-)
-
-mcp.add_tool(
-    _wrap_tool(tool_get_uid),
-    name="flashkey_get_uid",
-    description="Read the device unique identifier as a hex string. Requires prior authentication.",
-)
-
-mcp.add_tool(
-    _wrap_tool(tool_get_status),
-    name="flashkey_get_status",
-    description=(
-        "Read the combined device status including boot, rst, v5v, v3v3 pin "
-        "states and authentication status. Requires prior authentication."
-    ),
-)
-
-mcp.add_tool(
-    _wrap_tool(tool_enter_bootloader),
-    name="flashkey_enter_bootloader",
-    description=(
-        "Set BOOT pin high then pulse RST to enter the bootloader. "
-        "Equivalent to boot_set(True) + rst_pulse(). Requires prior authentication."
-    ),
-)
+def _keepalive() -> None:
+    """Background thread: PING every 3 seconds to prevent heartbeat timeout.
+    If PING fails, immediately try to reconnect.
+    """
+    global _fk, _authed
+    # Give handshake time to settle before first PING
+    time.sleep(0.5)  # allow handshake to settle before first PING
+    while True:
+        time.sleep(3)
+        try:
+            if _fk is not None:
+                _fk.commands.ping()
+            else:
+                # No connection yet — try to find and connect
+                _try_reconnect()
+        except Exception as exc:
+            logger.warning("Keepalive PING failed: %s", exc)
+            _try_reconnect()
 
 
 # ── Entry point ────────────────────────────────────────────────────────
 
+
 def main() -> None:
-    """Run the FlashKey MCP stdio server."""
-    mcp.run(transport="stdio")
+    """Run the FlashKey MCP server as a background HTTP SSE service.
+
+    On startup:
+    1. Detect the FK-01 USB device
+    2. Listen for HELLO frames and perform handshake
+    3. Fall back to active handshake if no HELLO within 12s
+    4. Start keepalive PING thread
+    5. Serve MCP tools over HTTP SSE on port 8100
+    """
+    global _fk, _authed
+    try:
+        info = find_port()
+        if info is None:
+            raise RuntimeError("No FlashKey device found")
+        logger.info("Device found: %s %s on %s (VID=%s PID=%s, S/N=%s)",
+                     info.get("vendor", "?"),
+                     info.get("model", "FlashKey-FK01"),
+                     info["port"],
+                     info.get("vid", "?"),
+                     info.get("pid", "?"),
+                     info.get("serial", "-"))
+        fk = FlashKey(port=info["port"], timeout=0.1)
+        _fk = fk
+
+        _authed = _wait_for_hello(fk, timeout=4)
+        if not _authed:
+            logger.info("No HELLO within timeout — active handshake")
+            try:
+                _authed = fk.commands.handshake()
+                if _authed:
+                    logger.info("Active handshake succeeded")
+                else:
+                    logger.warning("Active handshake failed")
+            except Exception as exc:
+                logger.warning("Active handshake error: %s", exc)
+
+        # Start keepalive thread
+        t_keep = threading.Thread(target=_keepalive, daemon=True)
+        t_keep.start()
+
+    except Exception as exc:
+        logger.warning("FlashKey device not available at startup: %s", exc)
+
+    parser = argparse.ArgumentParser(description="FlashKey FK-01 MCP Server")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help="HTTP SSE server port (default: %d)" % DEFAULT_PORT)
+    parser.add_argument("--host", type=str, default="127.0.0.1",
+                        help="Bind address (default: 127.0.0.1)")
+    args = parser.parse_args()
+
+    logger.info("Starting FlashKey MCP server at http://%s:%d (SSE)", args.host, args.port)
+    import uvicorn
+    app = mcp.sse_app()
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
