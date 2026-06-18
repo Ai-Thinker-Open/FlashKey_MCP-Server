@@ -70,6 +70,8 @@ mcp_servers:
 </details>
 
 > 🔐 **自动握手**：插入 FK-01 后固件自动发 HELLO 帧完成 Challenge-Response 认证，无需手动调用 handshake。
+>
+> 🤖 **AI 自助引导**：本仓库 `skills/flashkey-mcp/SKILL.md` 提供了完整的安装/配置/使用引导，Hermes Agent 加载后可自动完成全部流程。
 
 ---
 
