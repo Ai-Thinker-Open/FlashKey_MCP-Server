@@ -420,12 +420,18 @@ def main() -> None:
                         help="HTTP SSE server port (default: %d)" % DEFAULT_PORT)
     parser.add_argument("--host", type=str, default="127.0.0.1",
                         help="Bind address (default: 127.0.0.1)")
+    parser.add_argument("--stdio", action="store_true",
+                        help="Run in stdio mode (standard MCP plugin transport)")
     args = parser.parse_args()
 
-    logger.info("Starting FlashKey MCP server at http://%s:%d (SSE)", args.host, args.port)
-    import uvicorn
-    app = mcp.sse_app()
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    if args.stdio:
+        logger.info("Starting FlashKey MCP in stdio mode")
+        mcp.run(transport="stdio")
+    else:
+        logger.info("Starting FlashKey MCP server at http://%s:%d (SSE)", args.host, args.port)
+        import uvicorn
+        app = mcp.sse_app()
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
