@@ -124,7 +124,44 @@ pip install -e .
 | 模式 | 命令 | 说明 |
 |:----|:-----|:-----|
 | **⭐ Stdio（推荐）** | `flashkey-mcp --stdio` | AI 工具 `command` 自动启动，标准 MCP 插件方式 |
-| SSE（备选） | `flashkey-mcp` | 手动启动 HTTP 服务（端口 8100），`url` 连接 |
+| **SSE（备选）** | `flashkey-mcp` | 手动启动 HTTP 服务（端口 8100），`url` 连接 |
+
+### 🔄 USB 映射释放（SSE 模式）
+
+当 AI Agent（Hermes/Claude 等）在 **WSL** 中运行，而 FK-01 插在 Windows 宿主机时，flashkey-mcp 占用 COM 端口会阻止 `usbipd` 将设备映射到 WSL。
+
+SSE 模式提供两个 HTTP 端点让用户手动控制释放与重连：
+
+| 端点 | 说明 |
+|:-----|:-----|
+| `POST /release` | 关闭串口、清空认证、暂停自动重连 → 设备可被 usbipd 绑定到 WSL |
+| `POST /reconnect` | 重新扫描 FK-01、打开串口、自动 HELLO 握手 → 恢复连接 |
+
+**典型工作流：**
+
+```
+① flashkey-mcp 正常运行（SSE 模式，Windows 侧）
+         │
+         ▼
+② curl -X POST http://localhost:8100/release
+   → {"status": "released"}
+         │
+         ▼
+③ usbipd bind --busid <ID> --wsl       ← COM 已释放，绑定成功
+         │
+         ▼
+④ WSL 中使用 FK-01（烧录调试等）
+         │
+         ▼
+⑤ usbipd detach --busid <ID>
+   → COM 口重新出现在 Windows
+         │
+         ▼
+⑥ curl -X POST http://localhost:8100/reconnect
+   → {"status": "connected", "authed": true}
+```
+
+> 💡 释放后如果误调用了 MCP 工具，会返回明确的错误提示"已释放，请调用 /reconnect 恢复"，不会自动重连。
 
 ---
 

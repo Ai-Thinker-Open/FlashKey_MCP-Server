@@ -19,6 +19,9 @@ from typing import Any
 from flashkey_mcp import FlashKey, find_port
 from flashkey_mcp.commands import CMD_HELLO, STATUS_BIT_BOOT
 from flashkey_mcp.protocol import FrameParser
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,7 @@ DEFAULT_PORT = 8100
 
 _fk: FlashKey | None = None
 _authed: bool = False
+_released: bool = False  # True → serial port released for WSL USB remapping
 _fk_lock: threading.RLock = threading.RLock()
 
 
@@ -35,6 +39,11 @@ def _get_device() -> FlashKey:
     """Return the singleton ``FlashKey`` instance, connecting on first call."""
     global _fk
     with _fk_lock:
+        if _released:
+            raise RuntimeError(
+                "FK-01 serial port has been released for USB remapping. "
+                "Call POST /reconnect to re-establish connection."
+            )
         if _fk is None:
             info = find_port()
             if info is None:
@@ -242,6 +251,74 @@ def _wrap_tool(fn: Any) -> Any:
     return wrapper
 
 
+# ── HTTP endpoints (SSE mode only) ──────────────────────────────────────
+# POST /release  — manually release FK-01 serial port for WSL USB remapping
+# POST /reconnect — re-detect FK-01 and re-establish connection + handshake
+
+
+async def handle_release(request):
+    """Release the FK-01 serial port so that usbipd can bind it to WSL.
+
+    Closes the serial port, clears authentication state, and prevents the
+    keepalive thread from automatically reconnecting.  Call ``POST /reconnect``
+    to re-establish the connection after the USB device has been mapped back.
+    """
+    global _fk, _authed, _released
+    with _fk_lock:
+        if _fk is None:
+            return JSONResponse({"status": "released", "info": "already released"})
+        _released = True
+        _authed = False
+        try:
+            _fk.close()
+        except Exception:
+            pass
+        _fk = None
+        logger.info("Device released by user request — ready for USB remapping")
+        return JSONResponse({"status": "released"})
+
+
+async def handle_reconnect(request):
+    """Re-detect the FK-01 device and re-establish the serial connection.
+
+    Scans all serial ports for a FK-01, opens it, performs HELLO-based
+    or active challenge-response handshake, and resumes the keepalive thread.
+    Returns the authentication status.
+    """
+    global _fk, _authed, _released
+    info = find_port()
+    if info is None:
+        return JSONResponse(
+            {"status": "error", "error": "No FlashKey device found on any port"},
+            status_code=404,
+        )
+    try:
+        fk = FlashKey(port=info["port"], timeout=0.1)
+        authed = _wait_for_hello(fk, timeout=4)
+        if not authed:
+            try:
+                authed = fk.commands.handshake()
+            except Exception:
+                pass
+
+        with _fk_lock:
+            _released = False
+            _authed = authed
+            _fk = fk
+
+        if authed:
+            logger.info("Device reconnected — handshake succeeded")
+        else:
+            logger.warning("Device reconnected — handshake failed")
+        return JSONResponse({"status": "connected", "authed": authed})
+    except Exception as exc:
+        logger.error("Reconnect failed: %s", exc)
+        return JSONResponse(
+            {"status": "error", "error": str(exc)},
+            status_code=500,
+        )
+
+
 # ── MCP server setup ───────────────────────────────────────────────────
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
@@ -351,12 +428,15 @@ def _try_reconnect() -> None:
 def _keepalive() -> None:
     """Background thread: PING every 3 seconds to prevent heartbeat timeout.
     If PING fails, immediately try to reconnect.
+    Skips reconnect attempts while ``_released`` is True (user requested release).
     """
     global _fk, _authed
     # Give handshake time to settle before first PING
     time.sleep(0.5)  # allow handshake to settle before first PING
     while True:
         time.sleep(3)
+        if _released:
+            continue  # Don't auto-reconnect while user has released the device
         try:
             if _fk is not None:
                 _fk.commands.ping()
@@ -430,7 +510,16 @@ def main() -> None:
     else:
         logger.info("Starting FlashKey MCP server at http://%s:%d (SSE)", args.host, args.port)
         import uvicorn
-        app = mcp.sse_app()
+
+        # Build the base SSE app and wrap it with our custom HTTP endpoints
+        sse = mcp.sse_app()
+        app = Starlette(
+            routes=[
+                Route("/release", endpoint=handle_release, methods=["POST"]),
+                Route("/reconnect", endpoint=handle_reconnect, methods=["POST"]),
+                Mount("/", app=sse),
+            ]
+        )
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
