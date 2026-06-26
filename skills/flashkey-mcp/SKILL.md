@@ -1,84 +1,52 @@
 ---
 name: flashkey-mcp
-description: FlashKey FK-01 MCP 插件 — 安装、配置、使用引导。让 AI 工具自主控制 USB 烧录调试器（BOOT/RST/电源/烧录）。
+description: FlashKey FK-01 MCP 插件 — BL602/BL616/BL618 烧录调试。AI 工具启动时自动拉起，插上 FK-01 自动握手，说需求自动完成烧录。
 ---
 
-# flashkey-mcp — AI 安装使用引导
+# flashkey-mcp — AI 操作知识库
 
-> 本 skill 告诉 AI 如何安装、配置和使用 flashkey-mcp 插件来控制 FlashKey FK-01 硬件。
+> **不重复工具列表、安装命令、参数说明。** AI 从 `tools/list`/`tools/call` 能自己拿到。
+> 本文档只放 **MCP 协议层拿不到的领域知识**。
 
-## 安装
+## 芯片支持
 
-```bash
-pip install flashkey-mcp
-# 依赖：Python ≥ 3.10, pyserial, mcp (modelcontextprotocol/python-sdk)
-```
+| chip | 烧录方式 | 默认波特率 | SDK |
+|------|---------|:--------:|-----|
+| `bl602` | `make flash p={port} b={baud}` | 921600 | Ai-Thinker-WB2 |
+| `bl616` | `make flash CHIP=bl616 COMX={port} BAUDRATE={baud}` | 2000000 | bouffalo_sdk |
+| `bl618` | `make flash CHIP=bl618 COMX={port} BAUDRATE={baud}` | 2000000 | bouffalo_sdk |
 
-## 配置（Hermes Agent）
-
-在 `~/.hermes/config.yaml` 中添加：
-
-```yaml
-mcp_servers:
-  flashkey:
-    command: flashkey-mcp
-    args: ["--stdio"]
-    enabled: true
-```
-
-重启 Hermes 后，AI 自动获得 15 个 `flashkey_*` 工具。
-
-## 硬件前提
-
-- FlashKey FK-01 硬件通过 USB 连接 PC
-- 插入后自动完成 Challenge-Response 握手（固件自动发 HELLO）
-- PB11 LED：常亮 = 认证成功，慢闪 = 未认证/心跳超时
-
-## 可用工具
-
-| 工具 | 功能 | 需要认证 |
-|:-----|:-----|:--------:|
-| `flashkey_ping` | 检测设备连通性 | ❌ |
-| `flashkey_auth_status` | 查询认证状态 | ❌ |
-| `flashkey_boot_set/get` | BOOT 引脚 (PB3) 控制 | ✅ |
-| `flashkey_rst_set/get/pulse` | RST 引脚 (PB4) 控制 + 脉冲 | ✅ |
-| `flashkey_v5v_set/get` | 5V 电源 (PB1, 低有效) | ✅ |
-| `flashkey_v3v3_set/get` | 3.3V 电源 (PB0, 高有效) | ✅ |
-| `flashkey_get_version` | 读取固件版本 | ✅ |
-| `flashkey_get_uid` | 读取设备唯一 ID | ✅ |
-| `flashkey_get_status` | 查询全部引脚 + 认证状态 | ✅ |
-| `flashkey_enter_bootloader` | BOOT↑→RST↓ 进入烧录模式 | ✅ |
-
-## 典型工作流
+## 烧录故障排查
 
 ```
-1. flashkey_ping()                    → 验证设备连接
-2. flashkey_auth_status()             → 确认已认证
-3. flashkey_enter_bootloader()        → BOOT↑→RST↓ 脉冲→目标芯片进烧录模式
-4. 通过 CH340C 串口烧录固件
-5. flashkey_rst_pulse(ms=50)          → 复位目标芯片
+flashkey_flash() 失败
+├─ flashkey_status() 检查 authed/boot/rst
+├─ "make: No rule" → sdk_path 不对或用 tool 参数指定
+├─ "Failed to connect" → 降 baud_rate=115200 或检查 BOOT 电平
+├─ CH340C 被占用 → 关闭串口监视器
+└─ 烧录成功不启动 → rsl_pulse(50) + flashkey_log(port, duration=5)
 ```
 
-## 引脚映射
+## 启动日志特征
 
-| 功能 | 引脚 | 电平逻辑 |
-|:-----|:-----|:---------|
-| BOOT | PB3 | val=True→HIGH, val=False→LOW |
-| RST | PB4 | val=True→HIGH, val=False→LOW；pulse(ms) 拉低 Nms 后恢复 |
-| 5V_EN | PB1 | 低有效：False=开, True=关 |
-| 3.3V_EN | PB0 | 高有效：True=开, False=关 |
+| 芯片 | 正常启动关键词 | 等待 |
+|------|---------------|------|
+| BL602 | `Booting BL602...` 或 `[OS] Starting` | 1s |
+| BL616 | `Starting ...` 或 `Hello World!` | 2s |
+| BL618 | 同 BL616 | 2s |
 
-## Python API（直接调用）
+## 平台陷阱
 
-```python
-from flashkey_mcp import FlashKey
+- **Windows COM10+**：必须写 `\\.\COM10`
+- **WSL**：FK-01 + CH340C 都需要 `usbipd` 映射
+- **串口互斥**：`flashkey_log` 和 `flashkey_flash` 共用 CH340C，不能同时调
+- **v5v 反直觉**：`v5v_set(True)` = PB1 LOW = 开启 5V
 
-fk = FlashKey()
-# 自动握手已完成，直接使用
-print(fk.commands.get_status())
-fk.commands.boot_set(True)
-fk.commands.rst_pulse(50)
-fk.close()
-```
+## 引脚参考
 
-> 注意：flashkey-mcp 是一个**标准 MCP 协议插件**，支持 Hermes / Claude Desktop / Cursor / Cline 等所有兼容 MCP 的 AI 工具。
+| 功能 | 引脚 | 默认 | 控制 |
+|------|------|------|------|
+| BOOT | PB3 | HIGH | `boot_set()` |
+| RST | PB4 | HIGH | `rst_set()`/`rst_pulse()` |
+| 5V_EN | PB1 | HIGH=OFF | `v5v_set()` — 低有效 |
+| 3.3V_EN | PB0 | LOW=OFF | `v3v3_set()` — 高有效 |

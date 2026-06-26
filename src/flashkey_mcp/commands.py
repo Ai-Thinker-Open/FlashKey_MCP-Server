@@ -293,7 +293,7 @@ class FlashKeyCommands:
         return data.hex()
 
     def get_status(self) -> dict:
-        """Read the combined device status.
+        """Read the combined device pin status from firmware.
 
         The firmware returns 3 bytes:
             ``[boot_value, rst_value, bitfield]``
@@ -301,11 +301,12 @@ class FlashKeyCommands:
         where the bitfield encodes:
             bit 0 = boot, bit 1 = rst, bit 2 = v5v, bit 3 = v3v3
 
-        ``authed`` is fetched via a separate ``auth_status()`` call.
+        Note: ``authed`` is NOT included — the caller (DeviceManager)
+        merges auth state locally to avoid an extra round-trip.
 
         Returns:
-            A dict with keys ``boot``, ``rst``, ``v5v``, ``v3v3``,
-            ``authed`` — each ``1`` or ``0``.
+            A dict with keys ``boot``, ``rst``, ``v5v``, ``v3v3`` —
+            each ``1`` or ``0``.
         """
         _rsp_cmd, data = self._transceive(CMD_GET_STATUS)
 
@@ -317,13 +318,9 @@ class FlashKeyCommands:
         v5v = 1 if (bf & STATUS_BIT_V5V) else 0
         v3v3 = 1 if (bf & STATUS_BIT_V3V3) else 0
 
-        # Fetch auth status separately
-        authed = 1 if self.auth_status()["authed"] else 0
-
         return {
             "boot": boot,
             "rst": rst,
             "v5v": v5v,
             "v3v3": v3v3,
-            "authed": authed,
         }

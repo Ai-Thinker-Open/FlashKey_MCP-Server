@@ -12,6 +12,24 @@ FLASHKEY_VID = 0x1A86
 FLASHKEY_PID = 0xFE0D  # firmware usb_desc.c: idProduct = 0xFE0D
 
 
+def list_all_ports() -> "list[dict]":
+    """List all available serial ports with metadata.
+
+    Returns:
+        A list of dicts, each with keys ``port``, ``description``,
+        ``vid``, ``pid``.
+    """
+    result: list[dict] = []
+    for p in serial.tools.list_ports.comports():
+        result.append({
+            "port": p.device,
+            "description": (p.description or "").strip(),
+            "vid": f"{p.vid:04X}" if p.vid else "",
+            "pid": f"{p.pid:04X}" if p.pid else "",
+        })
+    return result
+
+
 def find_port() -> "dict | None":
     """Auto-discover the FlashKey FK-01 serial port and return device info.
 

@@ -1,526 +1,740 @@
-"""FlashKey FK-01 MCP HTTP SSE Server.
-
-Registers 15 tools covering all FlashKeyCommands plus a convenience
-``flashkey_enter_bootloader`` tool (handshake is automatic via HELLO).
+"""FlashKey FK-01 MCP Server — Stdio (default) or SSE transport.
 
 Usage::
 
-    flashkey-mcp
+    flashkey-mcp              # stdio mode (default)
+    flashkey-mcp --sse        # SSE on :8100
+    flashkey-mcp --sse --port 8200  # SSE on custom port
+
+On startup the server launches a background :class:`DeviceManager` that
+automatically detects FK-01 insertion, performs the HELLO handshake,
+and maintains a PING keepalive.  No user intervention needed —
+plug in the device and it just works.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
+import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
-from flashkey_mcp import FlashKey, find_port
-from flashkey_mcp.commands import CMD_HELLO, STATUS_BIT_BOOT
-from flashkey_mcp.protocol import FrameParser
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
+from flashkey_mcp.transport import list_all_ports
+from flashkey_mcp.device_manager import DeviceManager
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORT = 8100
-
-# ── Singleton / lazy-connection helpers ────────────────────────────────
-
-_fk: FlashKey | None = None
-_authed: bool = False
-_released: bool = False  # True → serial port released for WSL USB remapping
-_fk_lock: threading.RLock = threading.RLock()
+# ── Singleton device manager ─────────────────────────────────────────
+_dm: DeviceManager | None = None
+# Flash/log mutual exclusion lock (per serial port)
+_flash_lock = threading.Lock()
+_flash_active_port: str = ""
 
 
-def _get_device() -> FlashKey:
-    """Return the singleton ``FlashKey`` instance, connecting on first call."""
-    global _fk
-    with _fk_lock:
-        if _released:
-            raise RuntimeError(
-                "FK-01 serial port has been released for USB remapping. "
-                "Call POST /reconnect to re-establish connection."
-            )
-        if _fk is None:
-            info = find_port()
-            if info is None:
-                raise RuntimeError(
-                    "No FlashKey device found. "
-                    "Please connect the FK-01 hardware and try again."
-                )
-            _fk = FlashKey(port=info["port"])
-        return _fk
+def _get_dm() -> DeviceManager:
+    """Return the global DeviceManager, creating it on first access."""
+    global _dm
+    if _dm is None:
+        _dm = DeviceManager()
+        _dm.start()
+    return _dm
 
 
-def _require_authed() -> None:
-    """Raise ``RuntimeError`` if the device has not completed auth handshake."""
-    if not _authed:
-        raise RuntimeError(
-            "Not authenticated — device handshake not completed."
-        )
+# ======================================================================
+# Error wrapper — returns isError for unauthenticated tools
+# ======================================================================
 
+def _tool_wrapper(fn: Any, require_auth: bool = True) -> Any:
+    """Wrap a tool function with common error handling.
 
-def _clear_auth() -> None:
-    """Clear the authentication flag (e.g. on connection loss)."""
-    global _authed
-    _authed = False
-
-
-def _check_connection() -> bool:
-    """Check if the device connection is still alive by testing the transport.
-
-    Returns ``True`` if the device responds to a PING, ``False`` otherwise.
+    ``require_auth=True`` tools call ``DeviceManager.require_authed()``
+    before the tool body.  Errors are raised as ``ToolError`` so FastMCP
+    can set ``isError: true`` on the MCP response.
     """
-    global _fk
-    if _fk is None:
-        return False
-    try:
-        _fk.commands.ping()
-        return True
-    except Exception:
-        _clear_auth()
-        if _fk is not None:
-            try:
-                _fk.close()
-            except Exception:
-                pass
-        _fk = None
-        return False
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> dict:
+        if require_auth:
+            _get_dm().require_authed()
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
-# ── Tool implementations ───────────────────────────────────────────────
+def _require_fk():
+    """Return the FlashKey device handle or raise ToolError."""
+    dm = _get_dm()
+    fk = dm.fk
+    if fk is None:
+        raise ToolError("设备未连接，请插入 FlashKey FK-01")
+    return dm, fk
 
-def tool_ping() -> dict[str, Any]:
-    """Ping the device and return its magic string. Requires prior authentication."""
-    _require_authed()
-    fk = _get_device()
+
+# ======================================================================
+# Tool implementations  (NO DeviceManager parameter in signatures!)
+# ======================================================================
+
+# ── flashkey_status (NEW, no auth required) ──────────────────────────
+
+def _tool_status() -> dict:
+    """Get unified device status — always callable, no auth needed."""
+    return _get_dm().get_status()
+
+
+# ── flashkey_list_ports (NEW, no auth required) ──────────────────────
+
+def _tool_list_ports() -> dict:
+    """List all available serial ports on the system."""
+    return {"ports": list_all_ports()}
+
+
+# ── flashkey_ping ────────────────────────────────────────────────────
+
+def _tool_ping() -> dict:
+    _, fk = _require_fk()
     return fk.commands.ping()
 
 
-def tool_auth_status() -> dict[str, bool]:
-    """Query the current authentication state on the device. Requires prior authentication."""
-    _require_authed()
-    fk = _get_device()
-    return fk.commands.auth_status()
+# ── flashkey_auth_status (DEPRECATED) ────────────────────────────────
+
+def _tool_auth_status() -> dict:
+    _, fk = _require_fk()
+    result = fk.commands.auth_status()
+    result["_deprecated"] = "请使用 flashkey_status() 代替"
+    return result
 
 
-def tool_boot_set(value: bool) -> dict[str, str]:
-    """Set the BOOT pin high (True) or low (False)."""
-    _require_authed()
-    fk = _get_device()
+# ── GPIO tools ───────────────────────────────────────────────────────
+
+def _tool_boot_set(value: bool) -> dict:
+    _, fk = _require_fk()
     fk.commands.boot_set(value)
     return {"result": "ok"}
 
 
-def tool_boot_get() -> dict[str, bool]:
-    """Read the current BOOT pin state."""
-    _require_authed()
-    fk = _get_device()
+def _tool_boot_get() -> dict:
+    _, fk = _require_fk()
     return {"value": fk.commands.boot_get()}
 
 
-def tool_rst_set(value: bool) -> dict[str, str]:
-    """Set the RST (reset) pin high (True) or low (False)."""
-    _require_authed()
-    fk = _get_device()
+def _tool_rst_set(value: bool) -> dict:
+    _, fk = _require_fk()
     fk.commands.rst_set(value)
     return {"result": "ok"}
 
 
-def tool_rst_get() -> dict[str, bool]:
-    """Read the current RST pin state."""
-    _require_authed()
-    fk = _get_device()
+def _tool_rst_get() -> dict:
+    _, fk = _require_fk()
     return {"value": fk.commands.rst_get()}
 
 
-def tool_rst_pulse(ms: int = 50) -> dict[str, str]:
-    """Generate a pulse on the RST pin.
-
-    Args:
-        ms: Pulse width in milliseconds (default 50).
-    """
-    _require_authed()
-    fk = _get_device()
+def _tool_rst_pulse(ms: int = 50) -> dict:
+    _, fk = _require_fk()
     fk.commands.rst_pulse(ms)
     return {"result": "ok"}
 
 
-def tool_v5v_set(value: bool) -> dict[str, str]:
-    """Set the 5V power output on (True) or off (False)."""
-    _require_authed()
-    fk = _get_device()
+def _tool_v5v_set(value: bool) -> dict:
+    _, fk = _require_fk()
     fk.commands.v5v_set(value)
     return {"result": "ok"}
 
 
-def tool_v5v_get() -> dict[str, bool]:
-    """Read the current 5V power state."""
-    _require_authed()
-    fk = _get_device()
+def _tool_v5v_get() -> dict:
+    _, fk = _require_fk()
     return {"value": fk.commands.v5v_get()}
 
 
-def tool_v3v3_set(value: bool) -> dict[str, str]:
-    """Set the 3.3V power output on (True) or off (False)."""
-    _require_authed()
-    fk = _get_device()
+def _tool_v3v3_set(value: bool) -> dict:
+    _, fk = _require_fk()
     fk.commands.v3v3_set(value)
     return {"result": "ok"}
 
 
-def tool_v3v3_get() -> dict[str, bool]:
-    """Read the current 3.3V power state."""
-    _require_authed()
-    fk = _get_device()
+def _tool_v3v3_get() -> dict:
+    _, fk = _require_fk()
     return {"value": fk.commands.v3v3_get()}
 
 
-def tool_get_version() -> dict[str, str]:
-    """Read the firmware version string (e.g. "1.0.0")."""
-    _require_authed()
-    fk = _get_device()
+def _tool_get_version() -> dict:
+    _, fk = _require_fk()
     return fk.commands.get_version()
 
 
-def tool_get_uid() -> dict[str, str]:
-    """Read the device unique identifier as a hex string."""
-    _require_authed()
-    fk = _get_device()
+def _tool_get_uid() -> dict:
+    _, fk = _require_fk()
     return {"uid": fk.commands.get_uid()}
 
 
-def tool_get_status() -> dict[str, int]:
-    """Read combined device status (boot, rst, v5v, v3v3, authed)."""
-    _require_authed()
-    fk = _get_device()
-    return fk.commands.get_status()  # type: ignore[return-value]
+# ── flashkey_get_status (DEPRECATED — use flashkey_status) ──────────
+
+def _tool_get_status() -> dict:
+    _, fk = _require_fk()
+    result = fk.commands.get_status()
+    result["authed"] = 1
+    result["_deprecated"] = "请使用 flashkey_status() 代替"
+    return result
 
 
-def tool_enter_bootloader() -> dict[str, str]:
-    """Set BOOT high then pulse RST to enter the bootloader.
-
-    This is a convenience shortcut equivalent to calling
-    ``boot_set(True)`` followed by ``rst_pulse()``.
-    """
-    _require_authed()
-    fk = _get_device()
+def _tool_enter_bootloader() -> dict:
+    _, fk = _require_fk()
     fk.commands.boot_set(True)
     fk.commands.rst_pulse()
     return {"result": "ok"}
 
 
-def _wrap_tool(fn: Any) -> Any:
-    """Wrap a tool function so that common errors return JSON-able messages
-    instead of crashing the MCP server.
+# ======================================================================
+# flashkey_flash (NEW) — 需求三
+# ======================================================================
 
-    Also monitors connection health: if a transport error occurs,
-    the authentication flag is cleared and the connection is reset.
+# Register cleanup hook for process kill during flash
+_flash_cleanup_needed = False
+_flash_cleanup_dm: DeviceManager | None = None
+
+
+def _flash_atexit_cleanup() -> None:
+    """Emergency recovery: if the MCP process dies mid-flash, reset target."""
+    global _flash_cleanup_needed
+    if not _flash_cleanup_needed:
+        return
+    dm = _flash_cleanup_dm
+    if dm is None or dm.fk is None:
+        return
+    try:
+        logger.warning("atexit: emergency target recovery (RST pulse + BOOT low)")
+        dm.fk.commands.rst_pulse(50)
+        dm.fk.commands.boot_set(False)
+    except Exception:
+        pass
+
+
+atexit.register(_flash_atexit_cleanup)
+
+
+def _tool_flash(
+    firmware_path: str,
+    flash_port: str,
+    chip: str = "bl616",
+    baud_rate: int = 2000000,
+    tool: str = "",
+    sdk_path: str = "",
+) -> dict:
+    """Single-call flash workflow: BOOT↑→RST pulse→flash tool→RST→BOOT↓.
+
+    FK-01 handles BOOT/RST timing.  The actual firmware write is delegated
+    to an external tool::
+
+        BL602:  ``make -C <sdk_path> flash p=<port> b=<baud>``
+        BL616:  ``make -C <sdk_path> flash CHIP=bl616 COMX=<port> BAUDRATE=<baud_rate>``
+        BL618:  same as BL616 with CHIP=bl618
+
+    This is a **blocking** call.  Depending on firmware size, it may
+    take 10–120 seconds.
     """
-    import functools
+    global _flash_active_port, _flash_cleanup_needed, _flash_cleanup_dm
 
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
+    dm, fk = _require_fk()
+
+    # -- Normalize and validate firmware path -------------------------
+    fw_path = Path(firmware_path).expanduser().resolve()
+    if not fw_path.is_file():
+        raise ToolError(f"固件文件不存在: {firmware_path}")
+
+    # -- Resolve flash tool command ----------------------------------
+    flash_cmd = _resolve_flash_tool(chip, tool, sdk_path, flash_port, baud_rate, fw_path)
+
+    # -- Acquire flash lock (mutual exclusion with flashkey_log) ------
+    if not _flash_lock.acquire(blocking=False):
+        raise ToolError("烧录进行中，请等待当前烧录完成后再试")
+
+    _flash_active_port = flash_port
+    start_time = time.monotonic()
+    output_lines: list[str] = []
+
+    try:
+        # -- Enter bootloader mode (BL chips: BOOT=HIGH + RST pulse) --
+        fk.commands.boot_set(True)
+        fk.commands.rst_pulse(50)
+        time.sleep(0.2)  # ISP mode settling time
+
+        # -- Run external flash tool -----------------------------------
+        logger.info("Flashing %s: %s", chip, " ".join(flash_cmd))
+
+        _flash_cleanup_needed = True
+        _flash_cleanup_dm = dm
+
         try:
-            result = fn(*args, **kwargs)
-            return result
-        except RuntimeError as exc:
-            return {"error": str(exc)}
-        except (TimeoutError, OSError, IOError) as exc:
-            global _fk
-            _clear_auth()
-            if _fk is not None:
-                try:
-                    _fk.close()
-                except Exception:
-                    pass
-            _fk = None
-            return {
-                "error": (
-                    "Device connection lost — authentication cleared. "
-                    f"Please reconnect. ({exc})"
-                )
-            }
+            proc = subprocess.run(
+                flash_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=sdk_path if sdk_path else None,
+            )
+            if proc.stdout:
+                output_lines.append(proc.stdout)
+            if proc.stderr:
+                output_lines.append(proc.stderr)
+            success = proc.returncode == 0
+        except subprocess.TimeoutExpired:
+            success = False
+            output_lines.append("[错误] 烧录超时 (120 秒)")
+    finally:
+        # -- ALWAYS recover target -----------------------------------
+        _flash_cleanup_needed = False
+        try:
+            fk.commands.rst_pulse(50)
+            fk.commands.boot_set(False)
         except Exception as exc:
-            logger.exception("Unhandled error in tool %s", fn.__name__)
-            return {"error": f"Internal error: {exc}"}
+            logger.error("Target recovery failed: %s", exc)
+            output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
+        _flash_active_port = ""
+        _flash_lock.release()
 
-    return wrapper
+    duration = time.monotonic() - start_time
+    return {
+        "success": success,
+        "output": "\n".join(output_lines),
+        "duration": round(duration, 1),
+        "chip": chip,
+    }
 
 
-# ── HTTP endpoints (SSE mode only) ──────────────────────────────────────
-# POST /release  — manually release FK-01 serial port for WSL USB remapping
-# POST /reconnect — re-detect FK-01 and re-establish connection + handshake
+# ── FLASH_TOOL_CONFIG: chip → [make_cmd, baud_rate] ────────────────
+
+_FLASH_BAUD_MAP: dict[str, int] = {
+    "bl602": 921600,
+    "bl616": 2000000,
+    "bl618": 2000000,
+}
+
+_FLASH_MAKE_ARGS_MAP: dict[str, str] = {
+    "bl602": "p={port} b={baud}",
+    "bl616": "CHIP=bl616 COMX={port} BAUDRATE={baud}",
+    "bl618": "CHIP=bl618 COMX={port} BAUDRATE={baud}",
+}
 
 
-async def handle_release(request):
-    """Release the FK-01 serial port so that usbipd can bind it to WSL.
+def _resolve_flash_tool(
+    chip: str,
+    tool: str,
+    sdk_path: str,
+    flash_port: str,
+    baud_rate: int,
+    fw_path: Path,
+) -> list[str]:
+    """Resolve the flash tool command for the target chip.
 
-    Closes the serial port, clears authentication state, and prevents the
-    keepalive thread from automatically reconnecting.  Call ``POST /reconnect``
-    to re-establish the connection after the USB device has been mapped back.
+    Priority:
+    1. User-supplied ``tool`` (run as-is with args substitued)
+    2. ``make flash`` from SDK (if ``sdk_path`` is set)
+    3. ``make flash`` from current directory (if Makefile has 'flash' target)
+    4. Error with install instructions
     """
-    global _fk, _authed, _released
-    with _fk_lock:
-        if _fk is None:
-            return JSONResponse({"status": "released", "info": "already released"})
-        _released = True
-        _authed = False
+    supported = sorted(_FLASH_MAKE_ARGS_MAP.keys())
+    if chip not in _FLASH_MAKE_ARGS_MAP:
+        raise ToolError(
+            f"不支持的芯片类型: {chip}。当前支持: {', '.join(supported)}"
+        )
+
+    # -- 1. User-supplied custom tool ---------------------------------
+    if tool:
+        return _build_custom_cmd(tool, chip, flash_port, baud_rate, fw_path)
+
+    # -- 2. make flash from SDK ---------------------------------------
+    make_dir = sdk_path or "."
+    makefile = Path(make_dir) / "Makefile"
+
+    if makefile.is_file():
+        # Verify the Makefile has a 'flash' target
         try:
-            _fk.close()
+            result = subprocess.run(
+                ["make", "-C", make_dir, "-n", "flash"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 2:  # 2 = no such target
+                args_tpl = _FLASH_MAKE_ARGS_MAP[chip]
+                args_str = args_tpl.format(port=flash_port, baud=baud_rate)
+                return ["make", "-C", make_dir, "flash"] + args_str.split()
         except Exception:
             pass
-        _fk = None
-        logger.info("Device released by user request — ready for USB remapping")
-        return JSONResponse({"status": "released"})
+
+    # -- 3. No tool found → error with instructions ------------------
+    if chip == "bl602":
+        raise ToolError(
+            "未找到 BL602 烧录工具。请克隆 Ai-Thinker-WB2 SDK 并设置 sdk_path，"
+            "或通过 tool 参数指定烧录命令。\n"
+            "SDK: https://github.com/Ai-Thinker-Open/Ai-Thinker-WB2"
+        )
+    else:
+        raise ToolError(
+            f"未找到 {chip.upper()} 烧录工具。请克隆 Bouffalo SDK 并设置 sdk_path，"
+            f"或通过 tool 参数指定烧录命令。\n"
+            "SDK: https://github.com/bouffalolab/bouffalo_sdk"
+        )
 
 
-async def handle_reconnect(request):
-    """Re-detect the FK-01 device and re-establish the serial connection.
+def _build_custom_cmd(
+    tool: str, chip: str, flash_port: str, baud_rate: int, fw_path: Path,
+) -> list[str]:
+    """Build a flash command from a user-supplied tool string.
 
-    Scans all serial ports for a FK-01, opens it, performs HELLO-based
-    or active challenge-response handshake, and resumes the keepalive thread.
-    Returns the authentication status.
+    Supports ``{port}``, ``{baud}``, ``{firmware}``, ``{chip}`` placeholders.
     """
-    global _fk, _authed, _released
-    info = find_port()
-    if info is None:
-        return JSONResponse(
-            {"status": "error", "error": "No FlashKey device found on any port"},
-            status_code=404,
+    result = []
+    for part in tool.split():
+        part = part.format(
+            port=str(flash_port),
+            baud=str(baud_rate),
+            firmware=str(fw_path),
+            chip=chip,
         )
+        result.append(part)
+    return result
+
+
+# ======================================================================
+# flashkey_log (NEW) — 需求四
+# ======================================================================
+
+def _tool_log(
+    port: str,
+    baud_rate: int = 115200,
+    duration: int = 2,
+    max_lines: int = 50,
+    grep: str | None = None,
+) -> dict:
+    """Capture serial log output from the target chip.
+
+    Opens *port* (the same CH340C / USB-UART bridge used for flashing),
+    reads for *duration* seconds, optionally filters with *grep*, and
+    truncates to *max_lines* lines.
+    """
+    import serial as pyserial
+
+    # Mutual exclusion with flashkey_flash on the same port
+    if _flash_lock.locked() and _flash_active_port == port:
+        raise ToolError("烧录进行中，串口正忙，请等待烧录完成")
+
+    duration = min(max(duration, 1), 30)  # clamp 1–30 s (NFR-4)
+    max_lines = max(max_lines, 1)
+
+    actual_duration: float = 0.0
+    lines: list[str] = []
+
     try:
-        fk = FlashKey(port=info["port"], timeout=0.1)
-        authed = _wait_for_hello(fk, timeout=4)
-        if not authed:
-            try:
-                authed = fk.commands.handshake()
-            except Exception:
-                pass
-
-        with _fk_lock:
-            _released = False
-            _authed = authed
-            _fk = fk
-
-        if authed:
-            logger.info("Device reconnected — handshake succeeded")
-        else:
-            logger.warning("Device reconnected — handshake failed")
-        return JSONResponse({"status": "connected", "authed": authed})
+        ser = pyserial.Serial(port=port, baudrate=baud_rate, timeout=0.1)
     except Exception as exc:
-        logger.error("Reconnect failed: %s", exc)
-        return JSONResponse(
-            {"status": "error", "error": str(exc)},
-            status_code=500,
-        )
+        raise ToolError(f"无法打开串口 {port}: {exc}")
+
+    try:
+        ser.reset_input_buffer()
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            try:
+                data = ser.readline()
+            except Exception:
+                break
+            if data:
+                try:
+                    line = data.decode("utf-8", errors="replace").rstrip("\r\n")
+                except Exception:
+                    line = str(data)
+                lines.append(line)
+        actual_duration = duration
+    finally:
+        ser.close()
+
+    # Apply grep filter (case-insensitive substring match)
+    if grep and grep.strip():
+        grep_lower = grep.strip().lower()
+        lines = [ln for ln in lines if grep_lower in ln.lower()]
+
+    # Truncate to max_lines (filter first, then take last N)
+    truncated = len(lines) > max_lines
+    if truncated:
+        lines = lines[-max_lines:]
+
+    content = "\n".join(lines) if lines else "(无日志输出)"
+
+    return {
+        "lines": len(lines),
+        "duration": round(actual_duration, 1),
+        "truncated": truncated,
+        "content": content,
+    }
 
 
-# ── MCP server setup ───────────────────────────────────────────────────
+# ======================================================================
+# MCP server setup
+# ======================================================================
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 mcp = FastMCP(
     name="flashkey-mcp",
-    instructions="MCP server for FlashKey FK-01 hardware debug tool.",
+    instructions="MCP server for FlashKey FK-01 — AI-native USB programmer & debugger.  "
+    "Plug in FK-01 for automatic handshake; use flashkey_status() to check state.",
 )
 
-# Register all 15 tools with descriptions and parameter schemas.
+# ── Register 19 tools ───────────────────────────────────────────────
+# Note: each tool function's signature is used by FastMCP to generate
+# JSON Schema.  Only bool / int / str / float / Optional[str] types
+# are allowed — no custom class arguments.
 
-mcp.add_tool(_wrap_tool(tool_ping), name="flashkey_ping",
-    description="Ping the FlashKey device and return its magic identifier string. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_auth_status), name="flashkey_auth_status",
-    description="Query whether the device is currently authenticated. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_boot_set), name="flashkey_boot_set",
-    description="Set the BOOT pin high (True) or low (False). Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_boot_get), name="flashkey_boot_get",
-    description="Read the current BOOT pin state. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_rst_set), name="flashkey_rst_set",
-    description="Set the RST (reset) pin high (True) or low (False). Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_rst_get), name="flashkey_rst_get",
-    description="Read the current RST pin state. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_rst_pulse), name="flashkey_rst_pulse",
-    description="Generate a pulse on the RST pin with configurable width in ms. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_v5v_set), name="flashkey_v5v_set",
-    description="Enable or disable the 5V power output. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_v5v_get), name="flashkey_v5v_get",
-    description="Read the current 5V power state. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_v3v3_set), name="flashkey_v3v3_set",
-    description="Enable or disable the 3.3V power output. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_v3v3_get), name="flashkey_v3v3_get",
-    description="Read the current 3.3V power state. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_get_version), name="flashkey_get_version",
-    description="Read the firmware version string (e.g. '1.0.0'). Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_get_uid), name="flashkey_get_uid",
-    description="Read the device unique identifier as a hex string. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_get_status), name="flashkey_get_status",
-    description="Read the combined device status including boot, rst, v5v, v3v3 pin states and authentication status. Requires prior authentication.")
-mcp.add_tool(_wrap_tool(tool_enter_bootloader), name="flashkey_enter_bootloader",
-    description="Set BOOT pin high then pulse RST to enter the bootloader. Equivalent to boot_set(True) + rst_pulse(). Requires prior authentication.")
+# Status & discovery (no auth required)
+mcp.add_tool(
+    _tool_wrapper(_tool_status, require_auth=False),
+    name="flashkey_status",
+    description=(
+        "查询 FlashKey FK-01 统一状态。不需要认证，始终可调用。"
+        "返回认证状态(authed)、固件版本(version)、引脚状态(boot/rst/v5v/v3v3)。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_list_ports, require_auth=False),
+    name="flashkey_list_ports",
+    description="列出系统所有可用串口，每项包含端口名(port)、描述(description)、VID、PID。",
+)
+
+# Communication
+mcp.add_tool(
+    _tool_wrapper(_tool_ping),
+    name="flashkey_ping",
+    description="Ping FlashKey 设备并返回 magic 标识字符串。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_auth_status),
+    name="flashkey_auth_status",
+    description="查询 FK-01 认证状态。⚠️ 已弃用(DEPRECATED)，建议使用 flashkey_status()。需要认证。",
+)
+
+# GPIO control
+mcp.add_tool(
+    _tool_wrapper(_tool_boot_set),
+    name="flashkey_boot_set",
+    description="设置 BOOT 引脚 (PB3) 高(value=True) 或低(value=False)。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_boot_get),
+    name="flashkey_boot_get",
+    description="读取 BOOT 引脚 (PB3) 当前状态。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_rst_set),
+    name="flashkey_rst_set",
+    description="设置 RST 引脚 (PB4) 高(value=True) 或低(value=False)。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_rst_get),
+    name="flashkey_rst_get",
+    description="读取 RST 引脚 (PB4) 当前状态。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_rst_pulse),
+    name="flashkey_rst_pulse",
+    description="在 RST 引脚上产生指定毫秒(ms)的负脉冲，默认 50ms。需要认证。",
+)
+
+# Power control
+mcp.add_tool(
+    _tool_wrapper(_tool_v5v_set),
+    name="flashkey_v5v_set",
+    description="控制 5V 电源输出 (PB1, 低电平有效)，value=True 开启。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_v5v_get),
+    name="flashkey_v5v_get",
+    description="读取 5V 电源当前状态。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_v3v3_set),
+    name="flashkey_v3v3_set",
+    description="控制 3.3V 电源输出 (PB0, 高电平有效)，value=True 开启。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_v3v3_get),
+    name="flashkey_v3v3_get",
+    description="读取 3.3V 电源当前状态。需要认证。",
+)
+
+# Version & UID
+mcp.add_tool(
+    _tool_wrapper(_tool_get_version),
+    name="flashkey_get_version",
+    description="读取 FK-01 固件版本号 (如 '0.1.1')。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_get_uid),
+    name="flashkey_get_uid",
+    description="读取 FK-01 设备唯一 ID (16 字符 hex 字符串)。需要认证。",
+)
+
+# Deprecated (replaced by flashkey_status)
+mcp.add_tool(
+    _tool_wrapper(_tool_get_status),
+    name="flashkey_get_status",
+    description="读取引脚状态。⚠️ 已弃用(DEPRECATED)，建议使用 flashkey_status()。需要认证。",
+)
+
+# Convenience
+mcp.add_tool(
+    _tool_wrapper(_tool_enter_bootloader),
+    name="flashkey_enter_bootloader",
+    description=(
+        "组合操作: BOOT 拉高 → RST 脉冲 → 目标芯片进入烧录模式。"
+        "等效于 boot_set(True) + rst_pulse()。需要认证。"
+    ),
+)
+
+# ── NEW tools ───────────────────────────────────────────────────────
+
+mcp.add_tool(
+    _tool_wrapper(_tool_flash),
+    name="flashkey_flash",
+    description=(
+        "⚡ 一键烧录固件到目标芯片 (阻塞操作，耗时 10-120 秒)。\n"
+        "FK-01 自动控制 BOOT/RST 进入 ISP 模式，然后调用外部烧录工具写固件，最后自动复位恢复。\n"
+        "参数:\n"
+        "  firmware_path: 固件文件绝对路径\n"
+        "  flash_port: 烧录串口 (如 /dev/ttyUSB0 或 COM6)\n"
+        "  chip: 芯片类型，支持 bl602/bl616/bl618\n"
+        "  baud_rate: 烧录波特率 (bl602 默认 921600, bl616/bl618 默认 2000000)\n"
+        "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 占位符)\n"
+        "  sdk_path: 可选，芯片 SDK 根目录 (用于 make flash)\n"
+        "需要认证。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_log),
+    name="flashkey_log",
+    description=(
+        "📋 采集目标芯片串口日志 (需要认证)。\n"
+        "参数:\n"
+        "  port: 烧录通道串口 (与 flash_port 相同)\n"
+        "  baud_rate: 日志波特率，默认 115200\n"
+        "  duration: 采集时长(秒)，默认 2，最大 30\n"
+        "  max_lines: 返回最大行数，grep 过滤后截取，默认 50\n"
+        "  grep: 过滤关键词(子串匹配，不区分大小写)，None 表示不过滤\n"
+        "返回: lines(实际行数)、duration(采集时长)、truncated(是否截断)、content(日志文本)\n"
+        "与 flashkey_flash 互斥，串口忙时返回 isError。"
+    ),
+)
 
 
-# ── HELLO-based handshake helpers ──────────────────────────────────────
-
-
-def _wait_for_hello(fk: "FlashKey", timeout: float = 12) -> bool:
-    """Listen for HELLO frames and perform challenge-response handshake.
-
-    Args:
-        fk: Open FlashKey device instance.
-        timeout: Max seconds to wait for a HELLO frame.
-
-    Returns:
-        ``True`` if handshake succeeded, ``False`` otherwise.
-    """
-    parser = FrameParser()
-    fk.transport._ser.reset_input_buffer()
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        byte_data = fk.transport.read(1)
-        if byte_data:
-            result = parser.feed(byte_data[0])
-            if result is not None:
-                cmd, _data = result
-                if cmd == CMD_HELLO:
-                    try:
-                        if fk.commands.handshake():
-                            return True
-                    except Exception:
-                        pass
-    return False
-
-
-def _try_reconnect() -> None:
-    """Re-detect the FlashKey device and re-authenticate (called from keepalive)."""
-    global _fk, _authed
-    try:
-        new_info = find_port()
-        if new_info:
-            new_port = new_info["port"]
-            logger.info("Reconnecting on port %s (%s %s)",
-                         new_port, new_info.get("vendor", ""), new_info.get("model", ""))
-            new_fk = FlashKey(port=new_port, timeout=0.1)
-            _authed = _wait_for_hello(new_fk)
-            if not _authed:
-                _authed = new_fk.commands.handshake()
-            with _fk_lock:
-                if _authed:
-                    # Close old connection before replacing
-                    if _fk is not None:
-                        try:
-                            _fk.close()
-                        except Exception:
-                            pass
-                    _fk = new_fk
-                    logger.info("Reconnect + handshake succeeded")
-                else:
-                    new_fk.close()
-                    logger.warning("Reconnect failed to authenticate")
-        else:
-            logger.warning("No FlashKey device found on any port")
-    except Exception as exc:
-        logger.warning("Reconnect failed: %s", exc)
-
-
-def _keepalive() -> None:
-    """Background thread: PING every 3 seconds to prevent heartbeat timeout.
-    If PING fails, immediately try to reconnect.
-    Skips reconnect attempts while ``_released`` is True (user requested release).
-    """
-    global _fk, _authed
-    # Give handshake time to settle before first PING
-    time.sleep(0.5)  # allow handshake to settle before first PING
-    while True:
-        time.sleep(3)
-        if _released:
-            continue  # Don't auto-reconnect while user has released the device
-        try:
-            if _fk is not None:
-                _fk.commands.ping()
-            else:
-                # No connection yet — try to find and connect
-                _try_reconnect()
-        except Exception as exc:
-            logger.warning("Keepalive PING failed: %s", exc)
-            _try_reconnect()
-
-
-# ── Entry point ────────────────────────────────────────────────────────
-
+# ======================================================================
+# Entry point
+# ======================================================================
 
 def main() -> None:
-    """Run the FlashKey MCP server as a background HTTP SSE service.
+    """Launch the FlashKey MCP server.
 
-    On startup:
-    1. Detect the FK-01 USB device
-    2. Listen for HELLO frames and perform handshake
-    3. Fall back to active handshake if no HELLO within 12s
-    4. Start keepalive PING thread
-    5. Serve MCP tools over HTTP SSE on port 8100
+    Defaults to stdio transport.  Pass ``--sse`` for HTTP SSE mode
+    (requires ``pip install flashkey-mcp[sse]``).
     """
-    global _fk, _authed
-    try:
-        info = find_port()
-        if info is None:
-            raise RuntimeError("No FlashKey device found")
-        logger.info("Device found: %s %s on %s (VID=%s PID=%s, S/N=%s)",
-                     info.get("vendor", "?"),
-                     info.get("model", "FlashKey-FK01"),
-                     info["port"],
-                     info.get("vid", "?"),
-                     info.get("pid", "?"),
-                     info.get("serial", "-"))
-        fk = FlashKey(port=info["port"], timeout=0.1)
-        _fk = fk
-
-        _authed = _wait_for_hello(fk, timeout=4)
-        if not _authed:
-            logger.info("No HELLO within timeout — active handshake")
-            try:
-                _authed = fk.commands.handshake()
-                if _authed:
-                    logger.info("Active handshake succeeded")
-                else:
-                    logger.warning("Active handshake failed")
-            except Exception as exc:
-                logger.warning("Active handshake error: %s", exc)
-
-        # Start keepalive thread
-        t_keep = threading.Thread(target=_keepalive, daemon=True)
-        t_keep.start()
-
-    except Exception as exc:
-        logger.warning("FlashKey device not available at startup: %s", exc)
-
-    parser = argparse.ArgumentParser(description="FlashKey FK-01 MCP Server")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
-                        help="HTTP SSE server port (default: %d)" % DEFAULT_PORT)
-    parser.add_argument("--host", type=str, default="127.0.0.1",
-                        help="Bind address (default: 127.0.0.1)")
-    parser.add_argument("--stdio", action="store_true",
-                        help="Run in stdio mode (standard MCP plugin transport)")
+    parser = argparse.ArgumentParser(
+        description="FlashKey FK-01 MCP Server",
+    )
+    parser.add_argument(
+        "--sse", action="store_true",
+        help="Run in SSE (HTTP) mode instead of default stdio",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8100,
+        help="SSE server port (default: 8100)",
+    )
+    parser.add_argument(
+        "--host", type=str, default="127.0.0.1",
+        help="SSE bind address (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--stdio", action="store_true",
+        help="Run in stdio mode (this is the default)",
+    )
     args = parser.parse_args()
 
-    if args.stdio:
-        logger.info("Starting FlashKey MCP in stdio mode")
-        mcp.run(transport="stdio")
-    else:
-        logger.info("Starting FlashKey MCP server at http://%s:%d (SSE)", args.host, args.port)
-        import uvicorn
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
-        # Build the base SSE app and wrap it with our custom HTTP endpoints
-        sse = mcp.sse_app()
-        app = Starlette(
-            routes=[
-                Route("/release", endpoint=handle_release, methods=["POST"]),
-                Route("/reconnect", endpoint=handle_reconnect, methods=["POST"]),
-                Mount("/", app=sse),
-            ]
+    # Initialize device manager (non-blocking — runs in background thread)
+    dm = _get_dm()
+    logger.info("DeviceManager started (state: %s)", dm.state.value)
+
+    if args.sse:
+        # ── SSE mode ────────────────────────────────────────────────
+        _run_sse(args.host, args.port)
+    else:
+        # ── Stdio mode (default) ────────────────────────────────────
+        logger.info("Starting FlashKey MCP in stdio mode")
+        try:
+            mcp.run(transport="stdio")
+        finally:
+            dm.stop()
+
+
+def _run_sse(host: str, port: int) -> None:
+    """Run the MCP server over HTTP SSE transport."""
+    try:
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Mount, Route
+    except ImportError as exc:
+        logger.error(
+            "SSE mode requires extra dependencies.  "
+            "Install with: pip install flashkey-mcp[sse]"
         )
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        raise SystemExit(1) from exc
+
+    dm = _get_dm()
+
+    # -- HTTP endpoints (SSE mode only, 兼容旧 API) ------------------
+
+    async def handle_release(_request):
+        """POST /release — release FK-01 port for WSL USB remapping."""
+        dm.stop()
+        return JSONResponse({"status": "released"})
+
+    async def handle_reconnect(_request):
+        """POST /reconnect — re-detect FK-01 and re-handshake."""
+        global _dm
+        _dm = DeviceManager()
+        _dm.start()
+        # Wait briefly for handshake
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if _dm.authed:
+                break
+            time.sleep(0.2)
+        return JSONResponse({
+            "status": "connected" if _dm.connected else "not found",
+            "authed": _dm.authed,
+        })
+
+    sse_app = mcp.sse_app()
+    app = Starlette(
+        routes=[
+            Route("/release", endpoint=handle_release, methods=["POST"]),
+            Route("/reconnect", endpoint=handle_reconnect, methods=["POST"]),
+            Mount("/", app=sse_app),
+        ],
+    )
+
+    logger.info("Starting FlashKey MCP SSE server at http://%s:%d", host, port)
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="info")
+    finally:
+        dm.stop()
 
 
 if __name__ == "__main__":

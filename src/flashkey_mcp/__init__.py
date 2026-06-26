@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flashkey_mcp.transport import FlashKeyTransport, find_port
+from flashkey_mcp.transport import FlashKeyTransport, find_port, list_all_ports
 from flashkey_mcp.protocol import (
     build_frame,
     crc8_dallas,
@@ -15,6 +15,7 @@ from flashkey_mcp.commands import FlashKeyCommands
 __all__ = [
     "FlashKeyTransport",
     "find_port",
+    "list_all_ports",
     "crc8_dallas",
     "build_frame",
     "FrameParser",
@@ -34,6 +35,9 @@ class FlashKey:
             if info is None:
                 raise RuntimeError("No FlashKey device found")
             port = info["port"]
+            self.port_info = info
+        else:
+            self.port_info = {"port": port, "vid": "", "pid": "", "vendor": "", "model": ""}
         self.transport = FlashKeyTransport(port, timeout)
         self.commands = FlashKeyCommands(self.transport)
 

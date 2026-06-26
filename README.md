@@ -24,7 +24,7 @@ pip install flashkey-mcp
 mcp_servers:
   flashkey:
     command: flashkey-mcp
-    args: ["--stdio"]
+    args: []
     enabled: true
 ```
 </details>
@@ -37,7 +37,7 @@ mcp_servers:
   "mcpServers": {
     "flashkey": {
       "command": "flashkey-mcp",
-      "args": ["--stdio"]
+      "args": []
     }
   }
 }
@@ -51,7 +51,7 @@ mcp_servers:
 |:-------|:---|
 | 名称 | `flashkey` |
 | 类型 | `command` |
-| 命令 | `flashkey-mcp --stdio` |
+| 命令 | `flashkey-mcp` |
 </details>
 
 <details>
@@ -62,7 +62,7 @@ mcp_servers:
   "mcpServers": {
     "flashkey": {
       "command": "flashkey-mcp",
-      "args": ["--stdio"]
+      "args": []
     }
   }
 }
@@ -77,19 +77,23 @@ mcp_servers:
 
 ## 🤖 可用工具
 
-配置完成后，AI 工具自动发现以下 15 个工具：
+配置完成后，AI 工具自动发现以下 19 个工具：
 
 | 工具 | 功能 | 需要认证 |
 |:-----|:-----|:--------:|
-| `flashkey_ping` | 检测设备连通性 | ❌ |
-| `flashkey_auth_status` | 查询认证状态 | ❌ |
+| `flashkey_status` | **新** 统一状态查询（认证、版本、引脚） | ❌ |
+| `flashkey_list_ports` | **新** 列出系统所有可用串口 | ❌ |
+| `flashkey_flash` | **新** 一键烧录固件 (BOOT→RST→esptool→恢复) | ✅ |
+| `flashkey_log` | **新** 采集目标芯片串口日志 | ✅ |
+| `flashkey_ping` | 检测设备连通性 | ✅ |
+| `flashkey_auth_status` | 查询认证状态 ⚠️ 已弃用 | ✅ |
 | `flashkey_boot_set/get` | BOOT 引脚 (PB3) 控制 | ✅ |
 | `flashkey_rst_set/get/pulse` | RST 引脚 (PB4) 控制 + 脉冲 | ✅ |
 | `flashkey_v5v_set/get` | 5V 电源 (PB1, 低有效) 控制 | ✅ |
 | `flashkey_v3v3_set/get` | 3.3V 电源 (PB0, 高有效) 控制 | ✅ |
 | `flashkey_get_version` | 读取固件版本 | ✅ |
 | `flashkey_get_uid` | 读取设备唯一 ID | ✅ |
-| `flashkey_get_status` | 查询全部引脚 + 认证状态 | ✅ |
+| `flashkey_get_status` | 读取引脚状态 ⚠️ 已弃用，用 flashkey_status | ✅ |
 | `flashkey_enter_bootloader` | BOOT↑→RST↓ 进入烧录模式 | ✅ |
 
 ### 典型工作流
@@ -123,8 +127,8 @@ pip install -e .
 
 | 模式 | 命令 | 说明 |
 |:----|:-----|:-----|
-| **⭐ Stdio（推荐）** | `flashkey-mcp --stdio` | AI 工具 `command` 自动启动，标准 MCP 插件方式 |
-| **SSE（备选）** | `flashkey-mcp` | 手动启动 HTTP 服务（端口 8100），`url` 连接 |
+| **⭐ Stdio（默认）** | `flashkey-mcp` | AI 工具 `command` 自动启动，标准 MCP 插件方式 |
+| **SSE（备选）** | `flashkey-mcp --sse` | 手动启动 HTTP 服务（端口 8100），需安装 `pip install flashkey-mcp[sse]` |
 
 ### 🔄 USB 映射释放（SSE 模式）
 
@@ -203,12 +207,13 @@ flashkey-mcp/
 ├── pyproject.toml
 ├── README.md
 ├── src/flashkey_mcp/
-│   ├── __init__.py      # 包入口 + FlashKey 类
-│   ├── transport.py     # USB CDC 串口发现与通信
-│   ├── protocol.py      # 帧协议 + CRC-8 + 状态机
-│   ├── auth.py          # Challenge-Response 认证算法
-│   ├── commands.py      # 命令封装
-│   └── server.py        # MCP Server (stdio + SSE)
+│   ├── __init__.py          # 包入口 + FlashKey 类
+│   ├── transport.py         # USB CDC 串口发现与通信 + list_all_ports
+│   ├── protocol.py          # 帧协议 + CRC-8 + 状态机
+│   ├── auth.py              # Challenge-Response 认证算法
+│   ├── commands.py          # 命令封装 (15 条)
+│   ├── device_manager.py    # 设备生命周期管理 (热插拔+自动握手+保活)
+│   └── server.py            # MCP Server (19 工具, stdio 默认 + SSE可选)
 └── tests/
     └── ...
 ```

@@ -5,11 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flashkey-mcp"
 version = "0.0.1"
-description = "FlashKey FK-01 MCP communication library"
+description = "FlashKey FK-01 MCP server — AI-native USB programmer & debugger"
 requires-python = ">=3.10"
 dependencies = [
     "pyserial>=3.5",
     "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+sse = [
+    "starlette>=0.38",
+    "uvicorn>=0.30",
 ]
 
 [project.license]
