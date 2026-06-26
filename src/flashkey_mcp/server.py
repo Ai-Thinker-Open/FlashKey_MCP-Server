@@ -216,6 +216,110 @@ def _flash_atexit_cleanup() -> None:
 atexit.register(_flash_atexit_cleanup)
 
 
+def _flash_break_mode(
+    fk: Any,
+    flash_cmd: list[str],
+    sdk_path: str,
+    flash_timeout: int = 120,
+) -> tuple[bool, list[str]]:
+    """Serial break mode: run flash tool → wait for reset prompt → RST pulse.
+
+    Used by BL602 (default) where ``make flash`` starts first, prints a
+    "please reset" prompt, then FK-01 pulses RST to trigger the bootloader.
+
+    Returns:
+        ``(success, output_lines)``.
+    """
+    import threading as _threading
+
+    proc = None
+    output_lines: list[str] = []
+
+    try:
+        proc = subprocess.Popen(
+            flash_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=sdk_path if sdk_path else None,
+        )
+
+        prompt_seen = _threading.Event()
+        prompt_found = [False]  # mutable box for reader thread
+
+        # ── Reader thread: captures stdout, watches for reset prompt ──
+        def _read_stdout():
+            try:
+                for line in iter(proc.stdout.readline, ""):
+                    if line:
+                        output_lines.append(line.rstrip("\r\n"))
+                        if not prompt_found[0]:
+                            lower = line.lower()
+                            if any(
+                                kw in lower
+                                for kw in ("reset", "rest", "press", "uart", "复位")
+                            ):
+                                prompt_found[0] = True
+                                prompt_seen.set()
+            except Exception:
+                pass
+
+        reader = _threading.Thread(target=_read_stdout, daemon=True)
+        reader.start()
+
+        # ── Wait for reset prompt (30 s max) ─────────────────────────
+        if not prompt_seen.wait(timeout=30):
+            logger.warning("Break mode: no reset prompt within 30 s")
+            if proc.poll() is None:
+                proc.kill()
+            reader.join(timeout=2)
+            return False, output_lines + [
+                "[错误] 未在 30 秒内检测到烧录工具的复位提示，请尝试 mode='isp'"
+            ]
+
+        logger.info("Break mode: reset prompt detected, pulsing RST")
+
+        # ── PULSE RST to trigger bootloader ───────────────────────────
+        fk.commands.rst_pulse(50)
+        output_lines.append("[FlashKey] RST 脉冲已发出")
+        time.sleep(0.3)
+
+        # ── Wait for flash tool to finish ─────────────────────────────
+        remaining = flash_timeout - 30
+        try:
+            proc.wait(timeout=max(remaining, 0) or flash_timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            reader.join(timeout=2)
+            return False, output_lines + ["[错误] 烧录超时 (120 秒)"]
+
+        reader.join(timeout=3)
+
+        # Read any remaining stderr
+        try:
+            stderr_data = proc.stderr.read()
+            if stderr_data:
+                output_lines.append(stderr_data)
+        except Exception:
+            pass
+
+        success = proc.returncode == 0
+        return success, output_lines
+
+    except Exception as exc:
+        logger.exception("Break mode internal error: %s", exc)
+        return False, output_lines + [f"[错误] 烧录异常: {exc}"]
+
+
+# ── Chip → default mode ──────────────────────────────────────────────
+
+_FLASH_DEFAULT_MODE: dict[str, str] = {
+    "bl602": "break",
+    "bl616": "isp",
+    "bl618": "isp",
+}
+
+
 def _tool_flash(
     firmware_path: str,
     flash_port: str,
@@ -223,8 +327,18 @@ def _tool_flash(
     baud_rate: int = 2000000,
     tool: str = "",
     sdk_path: str = "",
+    mode: str = "",
 ) -> dict:
-    """Single-call flash workflow: BOOT↑→RST pulse→flash tool→RST→BOOT↓.
+    """Single-call flash workflow.
+
+    Two modes are supported:
+
+    **break** (default for BL602) — serial break / 串口打断:
+        Run flash tool → wait for "please reset" prompt →
+        RST pulse → wait for completion → recovery.
+
+    **isp** (default for BL616/BL618):
+        BOOT↑ → RST pulse → run flash tool → RST → BOOT↓.
 
     FK-01 handles BOOT/RST timing.  The actual firmware write is delegated
     to an external tool::
@@ -238,12 +352,18 @@ def _tool_flash(
     """
     global _flash_active_port, _flash_cleanup_needed, _flash_cleanup_dm
 
-    dm, fk = _require_fk()
+    # -- Validate params early ─────────────────────────────────────
+    if not mode:
+        mode = _FLASH_DEFAULT_MODE.get(chip, "isp")
 
-    # -- Normalize and validate firmware path -------------------------
+    if mode not in ("break", "isp"):
+        raise ToolError(f"不支持的烧录模式: {mode}。可选: break, isp")
+
     fw_path = Path(firmware_path).expanduser().resolve()
     if not fw_path.is_file():
         raise ToolError(f"固件文件不存在: {firmware_path}")
+
+    dm, fk = _require_fk()
 
     # -- Resolve flash tool command ----------------------------------
     flash_cmd = _resolve_flash_tool(chip, tool, sdk_path, flash_port, baud_rate, fw_path)
@@ -256,6 +376,34 @@ def _tool_flash(
     start_time = time.monotonic()
     output_lines: list[str] = []
 
+    # ── BREAK mode (serial interrupt / 串口打断) ─────────────────────
+    if mode == "break":
+        _flash_cleanup_needed = True
+        _flash_cleanup_dm = dm
+
+        try:
+            success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path)
+        finally:
+            _flash_cleanup_needed = False
+            try:
+                fk.commands.rst_pulse(50)
+                fk.commands.boot_set(False)
+            except Exception as exc:
+                logger.error("Target recovery failed: %s", exc)
+                output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
+            _flash_active_port = ""
+            _flash_lock.release()
+
+        duration = time.monotonic() - start_time
+        return {
+            "success": success,
+            "output": "\n".join(output_lines),
+            "duration": round(duration, 1),
+            "chip": chip,
+            "mode": mode,
+        }
+
+    # ── ISP mode (existing behaviour) ─────────────────────────────────
     try:
         # -- Enter bootloader mode (BL chips: BOOT=HIGH + RST pulse) --
         fk.commands.boot_set(True)
@@ -263,7 +411,7 @@ def _tool_flash(
         time.sleep(0.2)  # ISP mode settling time
 
         # -- Run external flash tool -----------------------------------
-        logger.info("Flashing %s: %s", chip, " ".join(flash_cmd))
+        logger.info("Flashing %s (ISP): %s", chip, " ".join(flash_cmd))
 
         _flash_cleanup_needed = True
         _flash_cleanup_dm = dm
@@ -302,6 +450,7 @@ def _tool_flash(
         "output": "\n".join(output_lines),
         "duration": round(duration, 1),
         "chip": chip,
+        "mode": mode,
     }
 
 
@@ -600,7 +749,9 @@ mcp.add_tool(
     name="flashkey_flash",
     description=(
         "⚡ 一键烧录固件到目标芯片 (阻塞操作，耗时 10-120 秒)。\n"
-        "FK-01 自动控制 BOOT/RST 进入 ISP 模式，然后调用外部烧录工具写固件，最后自动复位恢复。\n"
+        "支持两种烧录模式:\n"
+        "  break (串口打断, BL602 默认): 先跑烧录工具 → 等待复位提示 → FlashKey RST 脉冲 → 烧录完成\n"
+        "  isp   (ISP 模式, BL616/BL618 默认): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
         "  flash_port: 烧录串口 (如 /dev/ttyUSB0 或 COM6)\n"
@@ -608,6 +759,7 @@ mcp.add_tool(
         "  baud_rate: 烧录波特率 (bl602 默认 921600, bl616/bl618 默认 2000000)\n"
         "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 占位符)\n"
         "  sdk_path: 可选，芯片 SDK 根目录 (用于 make flash)\n"
+        "  mode: 烧录模式，默认按芯片自动选择 (bl602→break, 其他→isp)，可手动指定 'break' 或 'isp'\n"
         "需要认证。"
     ),
 )
