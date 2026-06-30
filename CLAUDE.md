@@ -64,7 +64,7 @@ server.py        — FastMCP server: 19 registered tools, flash/log mutual exclu
 
 **HELLO-driven handshake.** The firmware sends a HELLO frame (cmd=0x02) on boot. The DeviceManager waits for it (3s timeout), then initiates challenge-response (2s). Total budget: 5s. There is no `flashkey_handshake` tool — the old one was removed in commit `11cc7e1`.
 
-**PING keepalive.** Once authed, the DeviceManager pings every 2s. Two consecutive failures → transition to DISCONNECTED. The firmware has a heartbeat timeout; without PINGs the device drops auth state.
+**PING keepalive.** Once authed, the DeviceManager pings every 2s. Two consecutive failures → transition to DISCONNECTED. During `flashkey_flash`, keepalive is paused via `dm.pause_keepalive()` / `resume_keepalive()` to prevent false timeouts from USB bus saturation. Recovery (RST pulse + BOOT low) still runs after flash because the FK-01 port stays open.
 
 **Flash/log mutual exclusion.** `_flash_lock` (threading.Lock) prevents `flashkey_flash` and `flashkey_log` from using the same CH340C serial port simultaneously. `_flash_active_port` tracks which port is busy.
 

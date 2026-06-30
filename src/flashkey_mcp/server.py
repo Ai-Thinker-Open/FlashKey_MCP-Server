@@ -409,6 +409,10 @@ def _tool_flash(
     if not _flash_lock.acquire(blocking=False):
         raise ToolError("烧录进行中，请等待当前烧录完成后再试")
 
+    # Suppress PING keepalive during flash — USB bus may be saturated,
+    # causing false PING timeouts that would disconnect FK-01.
+    dm.pause_keepalive()
+
     _flash_active_port = flash_port
     start_time = time.monotonic()
     output_lines: list[str] = []
@@ -430,6 +434,7 @@ def _tool_flash(
                 output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
             _flash_active_port = ""
             _flash_lock.release()
+            dm.resume_keepalive()
 
         duration = time.monotonic() - start_time
         return {
@@ -461,6 +466,7 @@ def _tool_flash(
                 output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
             _flash_active_port = ""
             _flash_lock.release()
+            dm.resume_keepalive()
 
         duration = time.monotonic() - start_time
         return {
@@ -511,6 +517,7 @@ def _tool_flash(
             output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
         _flash_active_port = ""
         _flash_lock.release()
+        dm.resume_keepalive()
 
     duration = time.monotonic() - start_time
     return {

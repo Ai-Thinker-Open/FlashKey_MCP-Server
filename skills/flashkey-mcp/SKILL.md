@@ -182,11 +182,17 @@ BL602 的 break 模式关键词检测（不区分大小写）：`reset`, `rest`,
 
 ```
 flashkey_flash() 失败
-├─ flashkey_status() 先检查 authed / boot / rst 状态
+├─ flashkey_status() 先检查 authed / boot / rst / v5v / v3v3 状态
 ├─ authed: false → 拔出 FK-01 重新插入，等 5 秒
 ├─ "make: No rule" → sdk_path 不对，或用 tool 参数指定
-├─ "Failed to connect" → 降 baud_rate=115200，或检查 BOOT 电平
+├─ "Failed to connect" / "shake hand fail" / ROM bootloader 无响应
+│   ├─ FK-01 电源已开但 BL602 仍无响应 → 硬件连接问题，检查：
+│   │   1. CH340C TX → BL602 GPIO7(RX)、CH340C RX → BL602 GPIO16(TX) 接线
+│   │   2. Ai-WB2 模块可能需要板载 USB 独立供电，仅靠 FK-01 3.3V 可能不够
+│   │   3. 确认模块型号的电源要求（部分模组需 5V + 3.3V 同时供电）
+│   └─ 手动验证：按住 BOOT 按键 + 按 RESET → 看串口是否有 bootloader 输出
 ├─ CH340C 被占用 → 关闭串口监视器
+├─ PING keepalive 在烧录中丢失 → 已修复：烧录期间自动暂停 PING，烧录后恢复
 └─ 烧录成功但不启动 → rst_pulse(50) + flashkey_log(port, duration=5)
 ```
 

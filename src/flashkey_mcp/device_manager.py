@@ -102,6 +102,7 @@ class DeviceManager:
         # -- control --
         self._stop_event = threading.Event()
         self._monitor_thread: threading.Thread | None = None
+        self._pause_keepalive: bool = False  # suppress PING during flash ops
 
         # -- inotify (Linux) --
         self._inotify_fd: int = -1
@@ -163,6 +164,16 @@ class DeviceManager:
     # ------------------------------------------------------------------
     # Guard for MCP tools
     # ------------------------------------------------------------------
+
+    def pause_keepalive(self) -> None:
+        """Suppress PING keepalive (call before long flash operations)."""
+        self._pause_keepalive = True
+        logger.debug("PING keepalive paused")
+
+    def resume_keepalive(self) -> None:
+        """Resume PING keepalive after flash completes."""
+        self._pause_keepalive = False
+        logger.debug("PING keepalive resumed")
 
     def require_authed(self) -> None:
         """Raise ``RuntimeError`` with a Chinese i18n message if not authed."""
@@ -348,7 +359,11 @@ class DeviceManager:
     # ------------------------------------------------------------------
 
     def _ping_keepalive(self) -> None:
-        """Send PING every 2 s.  After 2 consecutive failures, disconnect."""
+        """Send PING every 2 s.  After 2 consecutive failures, disconnect.
+
+        PING is suppressed while ``_pause_keepalive`` is set (e.g. during
+        flash operations which saturate the USB bus).
+        """
         fail_count = 0
         while not self._stop_event.is_set():
             fk = self._fk
@@ -357,6 +372,12 @@ class DeviceManager:
 
             if state is not DeviceState.AUTHED or fk is None:
                 return  # state changed externally
+
+            # Skip PING during flash operations — USB bus may be saturated
+            if self._pause_keepalive:
+                self._sleep_or_watch(_PING_INTERVAL)
+                fail_count = 0  # reset fail count while paused
+                continue
 
             try:
                 fk.commands.ping(read_timeout=1.0)
