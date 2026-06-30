@@ -123,6 +123,8 @@ class FlashKeyTransport:
     """Serial transport for communicating with a FlashKey FK-01 device."""
 
     def __init__(self, port: str, timeout: float = 0.1):
+        from flashkey_mcp._guard import _require_mcp_runtime
+        _require_mcp_runtime()
         import threading
         self._lock = threading.RLock()
         self._ser = serial.Serial(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from flashkey_mcp._guard import _require_mcp_runtime
 from flashkey_mcp.transport import FlashKeyTransport, find_port, list_all_ports
 from flashkey_mcp.protocol import (
     build_frame,
@@ -30,6 +31,7 @@ class FlashKey:
     """High-level interface for FlashKey FK-01 device."""
 
     def __init__(self, port: str | None = None, timeout: float = 0.1):
+        _require_mcp_runtime()
         if port is None:
             info = find_port()
             if info is None:

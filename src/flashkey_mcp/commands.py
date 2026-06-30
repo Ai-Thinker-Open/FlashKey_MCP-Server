@@ -71,6 +71,8 @@ class FlashKeyCommands:
     """
 
     def __init__(self, transport: FlashKeyTransport) -> None:
+        from flashkey_mcp._guard import _require_mcp_runtime
+        _require_mcp_runtime()
         self._transport = transport
 
     # ── Private helpers ────────────────────────────────────────────────────

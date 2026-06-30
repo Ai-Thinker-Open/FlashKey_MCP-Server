@@ -882,6 +882,10 @@ def main() -> None:
     Defaults to stdio transport.  Pass ``--sse`` for HTTP SSE mode
     (requires ``pip install flashkey-mcp[sse]``).
     """
+    # Allow flashkey_mcp imports (runtime guard)
+    import os as _os
+    _os.environ["FLASHKEY_MCP"] = "1"
+
     parser = argparse.ArgumentParser(
         description="FlashKey FK-01 MCP Server",
     )
