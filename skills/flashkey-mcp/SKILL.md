@@ -52,9 +52,19 @@ FlashKey FK-01 是双芯片设备，插上后系统会出现**两个**串口。*
 
 ### 先检查 MCP 工具是否可用
 
-尝试调用 `flashkey_status()` —— 如果工具存在且返回了结果（包括无设备时的 `authed: false`），说明 MCP 已配置且 FK-01 server 在运行。**直接跳到步骤 3。**
+**直接用 AI 工具的原生 function call 调用 `flashkey_status()`**。不要用 shell 命令、不要 ps 查进程、不要检查配置文件。你就正常调用它，像调用任何其他 MCP 工具一样。
 
-如果工具不存在（`tool not found` 或类似错误），说明 MCP 还未配置，继续步骤 1。
+- 调用成功（返回了 JSON，即使 `authed: false`）→ MCP 已配置且 server 在运行。**直接跳到步骤 3。**
+- 返回 `tool not found` / `unknown tool` / 类似错误 → MCP 未配置，继续步骤 1。
+
+不要做这些事：
+- ❌ `flashkey-mcp --help`
+- ❌ `ps aux | grep flashkey-mcp`
+- ❌ `cat ~/.claude/settings.json`
+- ❌ 检查配置文件是否存在
+- ❌ 手动启动 flashkey-mcp 进程
+
+只要 `flashkey_status()` 能调通，就说明一切正常。
 
 ---
 
