@@ -289,7 +289,7 @@ def _flash_break_mode(
                             lower = line.lower()
                             if any(
                                 kw in lower
-                                for kw in ("reset", "rest", "press", "uart", "复位")
+                                for kw in ("reset", "rest", "press", "uart", "复位", "please", "gpio8")
                             ):
                                 prompt_found[0] = True
                                 prompt_seen.set()
@@ -346,6 +346,8 @@ def _flash_break_mode(
 # ── Chip → default mode ──────────────────────────────────────────────
 
 _FLASH_DEFAULT_MODE: dict[str, str] = {
+    # BL602: always tool-first (flash tool runs first, RST pulse on prompt).
+    # BL616/BL618: BOOT+RST first, then flash tool.
     "bl602": "break",
     "bl616": "isp",
     "bl618": "isp",
@@ -438,9 +440,40 @@ def _tool_flash(
             "mode": mode,
         }
 
-    # ── ISP mode (existing behaviour) ─────────────────────────────────
+    # ── BL602: always use tool-first approach ─────────────────────────
+    # BL602 bootloader requires the flash tool to be running BEFORE the
+    # reset — otherwise the bootloader window closes before the tool can
+    # handshake.  Both "break" and "isp" modes use the same flow:
+    #   start flash tool → wait for reset prompt → RST pulse → wait for completion
+    if chip == "bl602":
+        _flash_cleanup_needed = True
+        _flash_cleanup_dm = dm
+
+        try:
+            success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path)
+        finally:
+            _flash_cleanup_needed = False
+            try:
+                fk.commands.rst_pulse(50)
+                fk.commands.boot_set(False)
+            except Exception as exc:
+                logger.error("Target recovery failed: %s", exc)
+                output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
+            _flash_active_port = ""
+            _flash_lock.release()
+
+        duration = time.monotonic() - start_time
+        return {
+            "success": success,
+            "output": "\n".join(output_lines),
+            "duration": round(duration, 1),
+            "chip": chip,
+            "mode": mode,
+        }
+
+    # ── ISP mode (BL616/BL618) ────────────────────────────────────────
     try:
-        # -- Enter bootloader mode (BL chips: BOOT=HIGH + RST pulse) --
+        # Enter bootloader mode: BOOT=HIGH + RST pulse before flash tool
         fk.commands.boot_set(True)
         fk.commands.rst_pulse(50)
         time.sleep(0.2)  # ISP mode settling time
@@ -799,8 +832,10 @@ mcp.add_tool(
         "不要根据端口名猜测角色，不同系统上名字不同 (COMx / ttyACMx / ttyUSBx / cu.*)。\n"
         "\n"
         "支持两种烧录模式:\n"
-        "  break (串口打断, BL602 默认): 先跑烧录工具 → 等待复位提示 → FlashKey RST 脉冲 → 烧录完成\n"
-        "  isp   (ISP 模式, BL616/BL618 默认): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
+        "  BL602: 始终使用 tool-first 时序 (先跑烧录工具 → 等待复位提示 → FlashKey RST 脉冲 → 烧录完成)。\n"
+        "         因为 BL602 bootloader 要求工具先运行再复位，否则握手窗口会错过。\n"
+        "         mode 参数对 BL602 无效，始终走相同的 tool-first 流程。\n"
+        "  BL616/BL618 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
         "  flash_port: 烧录串口 — 必须选 flashkey_list_ports() 中 role=fk_flash 的端口\n"
@@ -808,7 +843,7 @@ mcp.add_tool(
         "  baud_rate: 烧录波特率 (bl602 默认 921600, bl616/bl618 默认 2000000)\n"
         "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 占位符)\n"
         "  sdk_path: 可选，芯片 SDK 根目录 (用于 make flash)\n"
-        "  mode: 烧录模式，默认按芯片自动选择 (bl602→break, 其他→isp)，可手动指定 'break' 或 'isp'\n"
+        "  mode: 烧录模式 (仅 BL616/BL618 有效，默认 isp)。BL602 忽略此参数，始终 tool-first。"
         "需要认证。"
     ),
 )
