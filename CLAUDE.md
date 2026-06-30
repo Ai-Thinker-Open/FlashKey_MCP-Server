@@ -21,6 +21,14 @@ flashkey-mcp
 # Run (SSE mode on :8100)
 flashkey-mcp --sse --port 8100
 
+# Debug logging — monitor runtime in another terminal
+flashkey-mcp --debug                              # DEBUG level, log to /tmp/flashkey-mcp.log
+flashkey-mcp --debug --log-file /path/to/fk.log   # custom log path
+
+# Monitor in real time:
+#   Linux/macOS:  tail -f /tmp/flashkey-mcp.log
+#   PowerShell:   Get-Content -Wait $env:TEMP\flashkey-mcp.log
+
 # Tests — manual integration scripts (require physical FK-01)
 python tests/test_s1_handshake.py
 python tests/test_flash_break_mode.py

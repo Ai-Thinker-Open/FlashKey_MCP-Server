@@ -18,6 +18,7 @@ import argparse
 import atexit
 import logging
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -809,18 +810,50 @@ def main() -> None:
         "--stdio", action="store_true",
         help="Run in stdio mode (this is the default)",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Enable DEBUG-level logging (default: INFO)",
+    )
+    parser.add_argument(
+        "--log-file", type=str, default="",
+        help=(
+            "Write logs to FILE in addition to stderr.  "
+            "Default: $TMPDIR/flashkey-mcp.log  "
+            "(tail -f /tmp/flashkey-mcp.log on Linux,  "
+            "Get-Content -Wait $env:TEMP\\flashkey-mcp.log on PowerShell)"
+        ),
+    )
     args = parser.parse_args()
 
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    # -- Resolve log file path ---------------------------------------------
+    log_file = args.log_file
+    if not log_file:
+        log_file = str(Path(tempfile.gettempdir()) / "flashkey-mcp.log")
+
+    # -- Configure logging (always stderr + file) --------------------------
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    log_fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    log_datefmt = "%H:%M:%S"
+
+    # File handler (always — so users can tail -f to monitor)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(log_fmt, datefmt=log_datefmt))
+
+    # Stderr handler
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(log_level)
+    stream_handler.setFormatter(logging.Formatter(log_fmt, datefmt=log_datefmt))
+
+    logging.basicConfig(level=log_level, handlers=[file_handler, stream_handler])
+
+    logger.info("Log file: %s", log_file)
+    if args.debug:
+        logger.info("Debug mode enabled")
 
     # Initialize device manager (non-blocking — runs in background thread)
     dm = _get_dm()
-    logger.info("DeviceManager started (state: %s)", dm.state.value)
+    logger.info("DeviceManager started (state: %s)", dm.state.name)
 
     if args.sse:
         # ── SSE mode ────────────────────────────────────────────────
