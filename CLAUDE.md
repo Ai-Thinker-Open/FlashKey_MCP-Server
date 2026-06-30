@@ -8,7 +8,12 @@ flashkey-mcp is an MCP server for the FlashKey FK-01, a dual-MCU USB programmer/
 
 **Lifecycle**: The MCP server is auto-launched by the AI tool on startup (via `settings.json` `mcpServers` entry). No manual `flashkey-mcp &` needed. After configuring `settings.json`, the user must restart the AI tool for MCP to pick up the new server. After restart, all 19 tools are available automatically.
 
-**Hard rule**: Never write Python scripts that `import flashkey_mcp` to control the device. The ONLY valid interface is through MCP tools (`flashkey_status()`, `flashkey_flash()`, `flashkey_log()`, etc.). If MCP tools aren't available, guide the user to install and configure the MCP server — do not bypass it with inline scripts.
+**Hard rule**: Never bypass the MCP framework to control FK-01. This includes:
+- ❌ `python -c "from flashkey_mcp.server import ..."`
+- ❌ `printf '...' | flashkey-mcp --stdio` (manual JSON-RPC, each call starts a fresh process)
+- ❌ `sudo flashkey-mcp` (never run as root)
+- ✅ Only use MCP tools through the native tool-calling interface
+`flashkey-mcp` is a persistent server, not a CLI tool. If MCP tools aren't available, configure and restart — never script a bypass.
 
 ## Commands
 
