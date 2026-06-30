@@ -9,23 +9,46 @@ import serial.tools.list_ports
 
 
 FLASHKEY_VID = 0x1A86
-FLASHKEY_PID = 0xFE0D  # firmware usb_desc.c: idProduct = 0xFE0D
+FLASHKEY_PID = 0xFE0D  # FK-01 main controller (MCP control port)
+
+CH340C_VID = 0x1A86
+CH340C_PID = 0x7523  # CH340C USB-UART bridge on FK-01 (flash/log port)
+
+
+def _classify_port(vid: int, pid: int) -> str:
+    """Classify a serial port by its VID/PID.
+
+    Returns:
+        ``"fk_control"`` — FK-01 main controller (for MCP, NOT for flashing).
+        ``"fk_flash"``   — CH340C bridge on FK-01 (for flash_key_flash / flashkey_log).
+        ``"unknown"``    — not a FlashKey device.
+    """
+    if vid == FLASHKEY_VID:
+        if pid == FLASHKEY_PID:
+            return "fk_control"
+        if pid == CH340C_PID:
+            return "fk_flash"
+    return "unknown"
 
 
 def list_all_ports() -> "list[dict]":
-    """List all available serial ports with metadata.
+    """List all available serial ports with metadata and role classification.
 
     Returns:
-        A list of dicts, each with keys ``port``, ``description``,
-        ``vid``, ``pid``.
+        A list of dicts with keys ``port``, ``description``, ``vid``, ``pid``,
+        and ``role`` — one of ``"fk_control"`` (MCP only), ``"fk_flash"``
+        (for flashing/logging), or ``"unknown"``.
     """
     result: list[dict] = []
     for p in serial.tools.list_ports.comports():
+        vid_int = p.vid or 0
+        pid_int = p.pid or 0
         result.append({
             "port": p.device,
             "description": (p.description or "").strip(),
-            "vid": f"{p.vid:04X}" if p.vid else "",
-            "pid": f"{p.pid:04X}" if p.pid else "",
+            "vid": f"{vid_int:04X}" if p.vid else "",
+            "pid": f"{pid_int:04X}" if p.pid else "",
+            "role": _classify_port(vid_int, pid_int),
         })
     return result
 

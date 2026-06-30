@@ -24,10 +24,43 @@ import time
 from pathlib import Path
 from typing import Any
 
-from flashkey_mcp.transport import list_all_ports
+from flashkey_mcp.transport import list_all_ports, FLASHKEY_VID, FLASHKEY_PID
 from flashkey_mcp.device_manager import DeviceManager
 
 logger = logging.getLogger(__name__)
+
+# ── Port validation ───────────────────────────────────────────────────
+
+
+def _validate_flash_port(port: str) -> None:
+    """Raise ``ToolError`` if *port* is the FK-01 control port.
+
+    The FK-01 has TWO serial ports on the same USB device:
+      - ``/dev/ttyACM0`` (VID=1A86, PID=FE0D) → FK-01 main controller,
+        used ONLY by MCP for GPIO/control commands.
+      - ``/dev/ttyUSB0`` (VID=1A86, PID=7523) → CH340C USB-UART bridge,
+        used for ``flashkey_flash`` and ``flashkey_log``.
+
+    Passing the control port to flash/log will break the MCP connection.
+    """
+    import serial.tools.list_ports as _list_ports
+    for p in _list_ports.comports():
+        if p.device == port:
+            if p.vid == FLASHKEY_VID and p.pid == FLASHKEY_PID:
+                # Find the correct flash port to suggest
+                flash_ports = [
+                    pp.device for pp in _list_ports.comports()
+                    if pp.vid == 0x1A86 and pp.pid == 0x7523
+                ]
+                hint = ""
+                if flash_ports:
+                    hint = f" 请使用烧录端口: {', '.join(flash_ports)}"
+                raise ToolError(
+                    f"{port} 是 FlashKey 主控端口 (MCP 控制用)，"
+                    f"不能用于烧录或日志。{hint}"
+                )
+            return  # port found, not FK-01 control — OK
+    # Port not found in system — let the actual serial open fail naturally
 
 # ── Singleton device manager ─────────────────────────────────────────
 _dm: DeviceManager | None = None
@@ -360,6 +393,9 @@ def _tool_flash(
     if mode not in ("break", "isp"):
         raise ToolError(f"不支持的烧录模式: {mode}。可选: break, isp")
 
+    # Reject FK-01 control port — must use CH340C flash port
+    _validate_flash_port(flash_port)
+
     fw_path = Path(firmware_path).expanduser().resolve()
     if not fw_path.is_file():
         raise ToolError(f"固件文件不存在: {firmware_path}")
@@ -567,6 +603,9 @@ def _tool_log(
     """
     import serial as pyserial
 
+    # Reject FK-01 control port
+    _validate_flash_port(port)
+
     # Mutual exclusion with flashkey_flash on the same port
     if _flash_lock.locked() and _flash_active_port == port:
         raise ToolError("烧录进行中，串口正忙，请等待烧录完成")
@@ -650,7 +689,13 @@ mcp.add_tool(
 mcp.add_tool(
     _tool_wrapper(_tool_list_ports, require_auth=False),
     name="flashkey_list_ports",
-    description="列出系统所有可用串口，每项包含端口名(port)、描述(description)、VID、PID。",
+    description=(
+        "列出系统所有可用串口。每项包含 port、description、VID、PID、role。\n"
+        "role=fk_control → FK-01 主控口 (MCP 内部使用，不能用于烧录/日志)\n"
+        "role=fk_flash   → CH340C 烧录口 (flashkey_flash / flashkey_log 用这个)\n"
+        "role=unknown    → 其他设备\n"
+        "烧录或采集日志前，务必先调用此工具确认端口 role。"
+    ),
 )
 
 # Communication
@@ -750,12 +795,17 @@ mcp.add_tool(
     name="flashkey_flash",
     description=(
         "⚡ 一键烧录固件到目标芯片 (阻塞操作，耗时 10-120 秒)。\n"
+        "\n"
+        "⚠️ 端口: flash_port 必须是 CH340C 烧录口 (/dev/ttyUSB0 或 COM6)，"
+        "绝对不能使用 FK-01 主控口 (/dev/ttyACM0)。"
+        "先用 flashkey_list_ports() 查看各端口 role，选择 role=fk_flash 的端口。\n"
+        "\n"
         "支持两种烧录模式:\n"
         "  break (串口打断, BL602 默认): 先跑烧录工具 → 等待复位提示 → FlashKey RST 脉冲 → 烧录完成\n"
         "  isp   (ISP 模式, BL616/BL618 默认): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
-        "  flash_port: 烧录串口 (如 /dev/ttyUSB0 或 COM6)\n"
+        "  flash_port: CH340C 烧录口 (role=fk_flash), 如 /dev/ttyUSB0\n"
         "  chip: 芯片类型，支持 bl602/bl616/bl618\n"
         "  baud_rate: 烧录波特率 (bl602 默认 921600, bl616/bl618 默认 2000000)\n"
         "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 占位符)\n"
@@ -769,8 +819,9 @@ mcp.add_tool(
     name="flashkey_log",
     description=(
         "📋 采集目标芯片串口日志 (需要认证)。\n"
+        "⚠️ port 必须是 CH340C 烧录口 (role=fk_flash, 如 /dev/ttyUSB0)，绝对不能使用 FK-01 主控口 (/dev/ttyACM0)。\n"
         "参数:\n"
-        "  port: 烧录通道串口 (与 flash_port 相同)\n"
+        "  port: CH340C 烧录口 (与 flash_port 相同，先用 flashkey_list_ports 确认 role)\n"
         "  baud_rate: 日志波特率，默认 115200\n"
         "  duration: 采集时长(秒)，默认 2，最大 30\n"
         "  max_lines: 返回最大行数，grep 过滤后截取，默认 50\n"
