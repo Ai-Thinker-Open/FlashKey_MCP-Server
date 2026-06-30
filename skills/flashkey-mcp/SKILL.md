@@ -133,9 +133,17 @@ mcp_servers:
     enabled: true
 ```
 
-配置完成后告诉用户：
+配置完成后**验证**：
 
-> "flashkey-mcp 已安装并配置完成。请**重启**当前 AI 工具使 MCP 生效。重启后插入 FlashKey FK-01，直接告诉我要烧录的固件和芯片型号即可。"
+```bash
+flashkey-mcp --help
+```
+
+应该看到 `FlashKey FK-01 MCP Server` 的帮助信息。
+
+验证通过后告诉用户：
+
+> "flashkey-mcp 已安装并配置完成。MCP 服务器会在 AI 工具启动时自动拉起，无需手动运行。请**重启**当前 AI 工具使配置生效。重启后插入 FlashKey FK-01，直接告诉我要烧录的固件和芯片型号即可。"
 
 ---
 
