@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 flashkey-mcp is an MCP server for the FlashKey FK-01, a dual-MCU USB programmer/debugger for BL602/BL616/BL618 chips. It lets AI agents flash firmware and capture logs via natural language — plug in FK-01, automatic handshake completes in 5s, no manual connection step.
 
+**Hard rule**: Never write Python scripts that `import flashkey_mcp` to control the device. The ONLY valid interface is through MCP tools (`flashkey_status()`, `flashkey_flash()`, `flashkey_log()`, etc.). If MCP tools aren't available, guide the user to install and configure the MCP server — do not bypass it with inline scripts.
+
 ## Commands
 
 ```bash
