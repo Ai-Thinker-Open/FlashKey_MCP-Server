@@ -95,7 +95,7 @@ In `break` mode, keyword matching (`reset`, `rest`, `press`, `uart`, `复位`) i
 
 ## Domain knowledge (not derivable from tool schemas)
 
-- **Dual-port architecture**: FK-01 exposes TWO serial ports. `/dev/ttyACM0` (VID=1A86, PID=FE0D) is the FK-01 main controller — MCP control only, NEVER use for flash/log. `/dev/ttyUSB0` (VID=1A86, PID=7523) is the CH340C USB-UART bridge — this is the flash/log port. `list_all_ports()` returns a `role` field (`fk_control` / `fk_flash` / `unknown`). `_validate_flash_port()` in server.py rejects the control port with a clear error message.
+- **Dual-port architecture**: FK-01 exposes TWO serial ports identified by VID/PID, not device name. `list_all_ports()` returns a `role` field: `fk_control` (1A86:FE0D, MCP only, never flash/log), `fk_flash` (1A86:7523, CH340C bridge, flash/log use this), `unknown` (other). Different OS use different names (ttyACMx/ttyUSBx/COMx/cu.*) — always match by `role`, not by device name. `_validate_flash_port()` in server.py rejects `fk_control` ports with a clear error.
 - **v5v is active-low**: `v5v_set(True)` pulls PB1 LOW → 5V ON. This is counterintuitive.
 - **Windows COM10+**: must use `\\.\COM10` syntax.
 - **Serial port mutex**: CH340C is shared between flash and log; they cannot run concurrently.
