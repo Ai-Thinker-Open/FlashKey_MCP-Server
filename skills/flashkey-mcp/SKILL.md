@@ -92,18 +92,29 @@ flashkey-mcp --help
 
 ## 步骤 2：配置 MCP 自动启动
 
-在 AI 工具的 MCP 配置文件中添加 flashkey 服务器。不同工具配置路径和格式如下：
+### 第一步：确定当前是什么 AI 工具
 
-### Claude Code / Claude Desktop
+检查以下目录/文件是否存在，确定配置文件路径：
 
-配置文件：
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+| 工具 | 检测方法 | 配置文件 |
+|------|---------|---------|
+| Claude Code (CLI) | `~/.claude/` 目录存在 | `~/.claude/mcp.json` |
+| MiMo Code | `~/.mimocode/mcp.json` 存在 | `~/.mimocode/mcp.json` |
+| Claude Desktop macOS | `~/Library/Application Support/Claude/` 存在 | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop Win | `%APPDATA%\Claude\` 存在 | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Cursor | Settings → MCP 菜单 | Cursor Settings GUI |
+| Cline (VS Code) | `~/.cline/` 目录存在 | `~/.cline/mcp.json` |
+| Hermes Agent | `~/.hermes/` 目录存在 | `~/.hermes/config.yaml` |
+
+### 第二步：写入配置
+
+**统一模板**（适用于 Claude Code / MiMo Code / Cline / Claude Desktop）：
 
 ```json
 {
   "mcpServers": {
     "flashkey": {
+      "type": "stdio",
       "command": "flashkey-mcp",
       "args": []
     }
@@ -111,35 +122,9 @@ flashkey-mcp --help
 }
 ```
 
-如果文件已有其他 MCP server，在 `mcpServers` 对象内追加 `flashkey` 条目，不要覆盖已有的。
+如果文件已存在且已有其他 MCP server，在 `mcpServers` 对象内追加 `"flashkey"` 条目，保留已有配置。
 
-### Cursor
-
-Cursor Settings → MCP → Add new MCP server：
-- 名称：`flashkey`
-- 类型：`command`
-- 命令：`flashkey-mcp`
-
-### Cline (VS Code)
-
-配置文件 `~/.cline/mcp.json`：
-
-```json
-{
-  "mcpServers": {
-    "flashkey": {
-      "command": "flashkey-mcp",
-      "args": []
-    }
-  }
-}
-```
-
-### Hermes Agent
-
-配置文件路径（按优先级尝试）：
-1. `~/.hermes/config.yaml`
-2. `~/.hermes/profiles/product/config.yaml`
+**Hermes Agent 用 YAML 格式**：
 
 ```yaml
 mcp_servers:
@@ -149,17 +134,17 @@ mcp_servers:
     enabled: true
 ```
 
-配置完成后**验证**：
+### 第三步：验证
 
 ```bash
 flashkey-mcp --help
 ```
 
-应该看到 `FlashKey FK-01 MCP Server` 的帮助信息。
+应该看到 `FlashKey FK-01 MCP Server` 的帮助信息。同时确认 `flashkey-mcp` 的默认模式是 **stdio**（输出中 `--stdio` 显示为 "this is the default"）。
 
-验证通过后告诉用户：
+### 第四步：告知用户
 
-> "flashkey-mcp 已安装并配置完成。MCP 服务器会在 AI 工具启动时自动拉起，无需手动运行。请**重启**当前 AI 工具使配置生效。重启后插入 FlashKey FK-01，直接告诉我要烧录的固件和芯片型号即可。"
+> "flashkey-mcp 已安装并配置完成（stdio 模式）。MCP 框架会在 AI 工具启动时自动以 stdio 子进程方式拉起 flashkey-mcp，无需手动运行。请**重启**当前 AI 工具使配置生效。重启后插入 FlashKey FK-01，直接告诉我要烧录的固件和芯片型号即可。"
 
 ---
 

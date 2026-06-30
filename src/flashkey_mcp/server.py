@@ -952,10 +952,11 @@ def main() -> None:
 
     if args.sse:
         # ── SSE mode ────────────────────────────────────────────────
+        logger.info("Transport: SSE (HTTP) on %s:%d", args.host, args.port)
         _run_sse(args.host, args.port)
     else:
         # ── Stdio mode (default) ────────────────────────────────────
-        logger.info("Starting FlashKey MCP in stdio mode")
+        logger.info("Transport: stdio")
         try:
             mcp.run(transport="stdio")
         finally:
