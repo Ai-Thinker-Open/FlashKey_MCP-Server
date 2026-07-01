@@ -74,48 +74,46 @@ pip install starlette uvicorn
 
 ---
 
-## 步骤 2：安装系统服务 + 配置 MCP
+## 步骤 2：选择运行模式
 
-### 2a. 安装 systemd 用户服务（Linux）
+flashkey-mcp 支持两种运行模式，选其中一种即可。**关键：config 格式必须和运行模式匹配。**
 
-```bash
-flashkey-mcp --service install
-```
-
-这条命令自动完成：复制 service 文件 → daemon-reload → enable（开机自启）→ start（立即启动）。
-
-验证：
+### 路径 A：SSE 服务模式（推荐 — 服务独立运行，开机自启）
 
 ```bash
-flashkey-mcp --service status
+pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
+flashkey-mcp --service install    # 安装 systemd 用户服务，立即启动 + 开机自启
 ```
 
-应该显示 `active=active, auto-start=enabled`。服务在 `http://127.0.0.1:8100/sse` 监听。
-
-### 2b. 非 systemd 环境（macOS / WSL 无 systemd / Windows）
-
-手动后台运行：
-
-```bash
-nohup flashkey-mcp --sse --host 127.0.0.1 --port 8100 > /dev/null 2>&1 &
-```
-
-### 2c. 配置 MCP 连接到 SSE 端点
-
-服务运行后，在 AI 工具的 MCP 配置文件中添加（**不需要 `command`，用 `url`**）：
+MCP config：
 
 ```json
-{
-  "mcpServers": {
-    "flashkey": {
-      "type": "sse",
-      "url": "http://127.0.0.1:8100/sse"
-    }
-  }
-}
+{"flashkey": {"type": "sse", "url": "http://127.0.0.1:8100/sse"}}
 ```
 
-配置文件路径检测：
+优点：服务独立于 AI 工具，重启工具不需要重启服务，设备状态保持。
+
+### 路径 B：stdio 模式（AI 工具管理进程）
+
+```bash
+pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
+```
+
+MCP config：
+
+```json
+{"flashkey": {"type": "stdio", "command": "flashkey-mcp", "args": []}}
+```
+
+AI 工具启动时自动拉起 flashkey-mcp 子进程。每次重启 AI 工具都会重建连接和握手。
+
+### ⚠️ 模式不能混用
+
+- SSE 服务的 config 用 `"url"`，不能用 `"command"`
+- stdio 模式的 config 用 `"command"`，不能用 `"url"`
+- 如果服务是 SSE 模式但 config 写了 stdio → 工具不可用
+
+### 配置文件位置
 
 | 工具 | 配置文件 |
 |------|---------|
@@ -126,9 +124,15 @@ nohup flashkey-mcp --sse --host 127.0.0.1 --port 8100 > /dev/null 2>&1 &
 | Cline (VS Code) | `~/.cline/mcp.json` |
 | Hermes Agent | `~/.hermes/config.yaml` |
 
-### 2d. 不需要重启 AI 工具
+### 诊断：服务在跑但工具不可用？
 
-SSE 连接是实时的。配置写入后 AI 工具会自动重连。如果工具没立即识别，手动触发 MCP 重连或等几秒。
+```bash
+flashkey-mcp --service status    # 检查 SSE 服务状态
+journalctl --user -u flashkey-mcp -f   # 查看服务日志
+tail -f /tmp/flashkey-mcp.log          # 查看文件日志
+```
+
+常见原因：config 格式和运行模式不匹配。例如服务跑 SSE 但 config 写的 `"command"`。修正 config 后 AI 工具应该自动重连。
 
 ---
 

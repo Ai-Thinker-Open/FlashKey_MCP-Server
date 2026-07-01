@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=__FLASHKEY_MCP_BIN__ --sse --host 127.0.0.1 --port 8100
+ExecStart=__FLASHKEY_MCP_BIN__ --sse --host 127.0.0.1 --port 8100 --log-file /tmp/flashkey-mcp.log
 Restart=always
 RestartSec=3
 StandardOutput=journal
