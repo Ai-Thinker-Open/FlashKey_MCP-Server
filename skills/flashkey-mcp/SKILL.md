@@ -59,7 +59,35 @@ FlashKey FK-01 是双芯片设备，插上后系统会出现**两个**串口。*
 
 ---
 
-## 步骤 1：安装 flashkey-mcp（含 SSE 依赖）
+## 步骤 1：确认 Python 版本 + 安装
+
+### 1a. 检查 Python 版本
+
+```bash
+python3 --version
+```
+
+- **>= 3.10** → 继续 1b
+- **< 3.10** → 需要安装 Python 3.10+：
+
+| 系统 | 安装方式 |
+|------|---------|
+| Ubuntu/Debian | `sudo apt install python3.12 python3.12-venv` |
+| macOS | `brew install python@3.12` |
+| Windows | `winget install Python.Python.3.12` 或 https://www.python.org/downloads/ |
+
+安装后用 `python3.12 -m pip install ...` 代替 `pip install ...`。
+
+如果系统有多个 Python 版本但默认不是 3.10+，先创建 venv：
+
+```bash
+python3.12 -m venv /tmp/fk-venv
+source /tmp/fk-venv/bin/activate
+pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
+# 后续 flashkey-mcp 命令都在这个 venv 里运行
+```
+
+### 1b. 安装 flashkey-mcp
 
 ```bash
 pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
