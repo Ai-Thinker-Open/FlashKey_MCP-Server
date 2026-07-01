@@ -6,10 +6,10 @@ Usage::
     flashkey-mcp --sse        # SSE on :8100
     flashkey-mcp --sse --port 8200  # SSE on custom port
 
-On the first MCP tool call (e.g. ``flashkey_status()``), the server
-lazily initialises a :class:`DeviceManager` that detects FK-01 insertion,
-performs the HELLO handshake, and maintains a PING keepalive.  The AI
-connects first, then triggers device discovery — not the other way around.
+On startup the server launches :class:`DeviceManager` which immediately
+begins scanning for FK-01, performs the HELLO handshake on detection,
+and maintains a PING keepalive.  By the time the AI makes its first
+tool call, FK-01 may already be authenticated and ready.
 """
 
 from __future__ import annotations
@@ -71,9 +71,8 @@ _flash_active_port: str = ""
 def _get_dm() -> DeviceManager:
     """Return the global DeviceManager, creating and starting it on first access.
 
-    DeviceManager is NOT started at server launch.  It initialises lazily
-    on the first MCP tool call — this way the AI connects first, then
-    triggers device discovery and handshake.
+    Started at MCP server launch so FK-01 discovery and handshake happen
+    before the AI's first tool call.
     """
     global _dm
     if _dm is None:
@@ -1165,8 +1164,9 @@ def main() -> None:
     if args.debug:
         logger.info("Debug mode enabled")
 
-    # DeviceManager initialises lazily on first tool call — AI connects
-    # first, then triggers handshake via flashkey_status() or any other tool.
+    # Start DeviceManager immediately — by the time AI makes its first
+    # tool call, FK-01 may already be discovered and handshake completed.
+    _get_dm()
 
     if args.sse:
         # ── SSE mode ────────────────────────────────────────────────
