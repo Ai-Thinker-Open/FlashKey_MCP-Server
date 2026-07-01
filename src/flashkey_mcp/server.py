@@ -279,6 +279,10 @@ def _flash_break_mode(
     """
     import threading as _threading
 
+    # Ensure FK-01 GPIOs don't conflict with CH340C DTR/RTS control.
+    # BOOT low = default, CH340C handles reset signalling via RTS.
+    fk.commands.boot_set(False)
+
     proc = None
     output_lines: list[str] = []
 
