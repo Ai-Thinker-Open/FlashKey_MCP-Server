@@ -6,10 +6,10 @@ Usage::
     flashkey-mcp --sse        # SSE on :8100
     flashkey-mcp --sse --port 8200  # SSE on custom port
 
-On startup the server launches a background :class:`DeviceManager` that
-automatically detects FK-01 insertion, performs the HELLO handshake,
-and maintains a PING keepalive.  No user intervention needed —
-plug in the device and it just works.
+On the first MCP tool call (e.g. ``flashkey_status()``), the server
+lazily initialises a :class:`DeviceManager` that detects FK-01 insertion,
+performs the HELLO handshake, and maintains a PING keepalive.  The AI
+connects first, then triggers device discovery — not the other way around.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import argparse
 import atexit
 import logging
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -68,11 +69,17 @@ _flash_active_port: str = ""
 
 
 def _get_dm() -> DeviceManager:
-    """Return the global DeviceManager, creating it on first access."""
+    """Return the global DeviceManager, creating and starting it on first access.
+
+    DeviceManager is NOT started at server launch.  It initialises lazily
+    on the first MCP tool call — this way the AI connects first, then
+    triggers device discovery and handshake.
+    """
     global _dm
     if _dm is None:
         _dm = DeviceManager()
         _dm.start()
+        logger.info("DeviceManager started (state: %s)", _dm.state.name)
     return _dm
 
 
@@ -876,11 +883,92 @@ mcp.add_tool(
 # Entry point
 # ======================================================================
 
+def _handle_service_command(action: str) -> None:
+    """Install / uninstall / check status of systemd user service."""
+    import shutil
+    import subprocess as _sp
+
+    service_name = "flashkey-mcp"
+    unit_file = Path(__file__).resolve().parent.parent.parent / "configs" / f"{service_name}.service"
+    user_unit_dir = Path.home() / ".config" / "systemd" / "user"
+
+    if action == "status":
+        result = _sp.run(
+            ["systemctl", "--user", "is-active", service_name],
+            capture_output=True, text=True,
+        )
+        enabled = _sp.run(
+            ["systemctl", "--user", "is-enabled", service_name],
+            capture_output=True, text=True,
+        )
+        active = result.stdout.strip()
+        auto_start = enabled.stdout.strip()
+        print(f"flashkey-mcp service: active={active}, auto-start={auto_start}")
+        if active == "active":
+            print(f"SSE endpoint: http://127.0.0.1:8100/sse")
+        if active != "active":
+            print(f"Hint: flashkey-mcp --service install && systemctl --user start {service_name}")
+        return
+
+    if action == "install":
+        # Resolve the full path to flashkey-mcp binary
+        fk_bin = shutil.which("flashkey-mcp")
+        if not fk_bin:
+            # Try common pip user install locations
+            for candidate in [
+                Path.home() / ".local" / "bin" / "flashkey-mcp",
+                Path.home() / ".local" / "share" / "uv" / "python",
+            ]:
+                if candidate.exists():
+                    fk_bin = str(candidate)
+                    break
+            else:
+                print("Error: cannot find flashkey-mcp binary. Ensure it's on PATH.")
+                sys.exit(1)
+
+        user_unit_dir.mkdir(parents=True, exist_ok=True)
+        if not unit_file.exists():
+            print(f"Error: service template not found at {unit_file}")
+            sys.exit(1)
+
+        # Read template and substitute the binary path
+        template = unit_file.read_text()
+        unit_content = template.replace("__FLASHKEY_MCP_BIN__", fk_bin)
+        dest = user_unit_dir / f"{service_name}.service"
+        dest.write_text(unit_content)
+        print(f"Installed: {dest}")
+        print(f"Binary: {fk_bin}")
+        _sp.run(["systemctl", "--user", "daemon-reload"], check=True)
+        _sp.run(["systemctl", "--user", "enable", service_name], check=True)
+        _sp.run(["systemctl", "--user", "start", service_name], check=True)
+        print("Service started. SSE endpoint: http://127.0.0.1:8100/sse")
+        print("MCP config to use in AI tool:")
+        print('  {"flashkey": {"type": "sse", "url": "http://127.0.0.1:8100/sse"}}')
+        return
+
+    if action == "uninstall":
+        _sp.run(["systemctl", "--user", "stop", service_name], capture_output=True)
+        _sp.run(["systemctl", "--user", "disable", service_name], capture_output=True)
+        unit = user_unit_dir / f"{service_name}.service"
+        if unit.exists():
+            unit.unlink()
+            print(f"Removed: {unit}")
+        _sp.run(["systemctl", "--user", "daemon-reload"], check=True)
+        print("Service uninstalled.")
+        return
+
+
 def main() -> None:
     """Launch the FlashKey MCP server.
 
     Defaults to stdio transport.  Pass ``--sse`` for HTTP SSE mode
     (requires ``pip install flashkey-mcp[sse]``).
+
+    Service management::
+
+        flashkey-mcp --service install     # install systemd user service
+        flashkey-mcp --service uninstall   # remove systemd user service
+        flashkey-mcp --service status      # check if service is running
     """
     # Allow flashkey_mcp imports (runtime guard)
     import os as _os
@@ -918,7 +1006,16 @@ def main() -> None:
             "Get-Content -Wait $env:TEMP\\flashkey-mcp.log on PowerShell)"
         ),
     )
+    parser.add_argument(
+        "--service", type=str, choices=["install", "uninstall", "status"],
+        help="Manage systemd user service (install/uninstall/status)",
+    )
     args = parser.parse_args()
+
+    # -- Service management commands --------------------------------------
+    if args.service:
+        _handle_service_command(args.service)
+        return
 
     # -- Resolve log file path ---------------------------------------------
     log_file = args.log_file
@@ -946,9 +1043,8 @@ def main() -> None:
     if args.debug:
         logger.info("Debug mode enabled")
 
-    # Initialize device manager (non-blocking — runs in background thread)
-    dm = _get_dm()
-    logger.info("DeviceManager started (state: %s)", dm.state.name)
+    # DeviceManager initialises lazily on first tool call — AI connects
+    # first, then triggers handshake via flashkey_status() or any other tool.
 
     if args.sse:
         # ── SSE mode ────────────────────────────────────────────────
@@ -977,18 +1073,21 @@ def _run_sse(host: str, port: int) -> None:
         )
         raise SystemExit(1) from exc
 
-    dm = _get_dm()
-
     # -- HTTP endpoints (SSE mode only, 兼容旧 API) ------------------
 
     async def handle_release(_request):
         """POST /release — release FK-01 port for WSL USB remapping."""
-        dm.stop()
+        global _dm
+        if _dm is not None:
+            _dm.stop()
+            _dm = None
         return JSONResponse({"status": "released"})
 
     async def handle_reconnect(_request):
         """POST /reconnect — re-detect FK-01 and re-handshake."""
         global _dm
+        if _dm is not None:
+            _dm.stop()
         _dm = DeviceManager()
         _dm.start()
         # Wait briefly for handshake

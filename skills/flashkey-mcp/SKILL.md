@@ -52,105 +52,99 @@ FlashKey FK-01 是双芯片设备，插上后系统会出现**两个**串口。*
 
 ### 先检查 MCP 工具是否可用
 
-**直接用 AI 工具的原生 function call 调用 `flashkey_status()`**。不要用 shell 命令、不要 ps 查进程、不要检查配置文件。你就正常调用它，像调用任何其他 MCP 工具一样。
+**直接用 AI 工具的原生 function call 调用 `flashkey_status()`**。不要用 shell 命令、不要 ps 查进程、不要检查配置文件。
 
-- 调用成功（返回了 JSON，即使 `authed: false`）→ MCP 已配置且 server 在运行。**直接跳到步骤 3。**
-- 返回 `tool not found` / `unknown tool` / 类似错误 → MCP 未配置，继续步骤 1。
-
-不要做这些事：
-- ❌ `flashkey-mcp --help`
-- ❌ `ps aux | grep flashkey-mcp`
-- ❌ `cat ~/.claude/settings.json`
-- ❌ 检查配置文件是否存在
-- ❌ 手动启动 flashkey-mcp 进程
-
-只要 `flashkey_status()` 能调通，就说明一切正常。
+- 调用成功 → MCP 已连接。**直接跳到步骤 3。**
+- 返回 `tool not found` / `unknown tool` → MCP 未连接，继续步骤 1 检查服务状态。
 
 ---
 
-## 步骤 1：安装 flashkey-mcp
+## 步骤 1：安装 flashkey-mcp（含 SSE 依赖）
+
+```bash
+pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
+```
+
+如果失败（网络/权限），分两步：
 
 ```bash
 pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
+pip install starlette uvicorn
 ```
 
-如果失败（网络/权限），尝试：
+---
+
+## 步骤 2：安装系统服务 + 配置 MCP
+
+### 2a. 安装 systemd 用户服务（Linux）
 
 ```bash
-pip install --user git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
+flashkey-mcp --service install
 ```
+
+这条命令自动完成：复制 service 文件 → daemon-reload → enable（开机自启）→ start（立即启动）。
 
 验证：
 
 ```bash
-flashkey-mcp --help
+flashkey-mcp --service status
 ```
 
-应该看到 `FlashKey FK-01 MCP Server` 的帮助信息。
+应该显示 `active=active, auto-start=enabled`。服务在 `http://127.0.0.1:8100/sse` 监听。
 
----
+### 2b. 非 systemd 环境（macOS / WSL 无 systemd / Windows）
 
-## 步骤 2：配置 MCP 自动启动
+手动后台运行：
 
-### 第一步：确定当前是什么 AI 工具
+```bash
+nohup flashkey-mcp --sse --host 127.0.0.1 --port 8100 > /dev/null 2>&1 &
+```
 
-检查以下目录/文件是否存在，确定配置文件路径：
+### 2c. 配置 MCP 连接到 SSE 端点
 
-| 工具 | 检测方法 | 配置文件 |
-|------|---------|---------|
-| Claude Code (CLI) | `~/.claude/` 目录存在 | `~/.claude/mcp.json` |
-| MiMo Code | `~/.mimocode/mcp.json` 存在 | `~/.mimocode/mcp.json` |
-| Claude Desktop macOS | `~/Library/Application Support/Claude/` 存在 | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop Win | `%APPDATA%\Claude\` 存在 | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Cursor | Settings → MCP 菜单 | Cursor Settings GUI |
-| Cline (VS Code) | `~/.cline/` 目录存在 | `~/.cline/mcp.json` |
-| Hermes Agent | `~/.hermes/` 目录存在 | `~/.hermes/config.yaml` |
-
-### 第二步：写入配置
-
-**统一模板**（适用于 Claude Code / MiMo Code / Cline / Claude Desktop）：
+服务运行后，在 AI 工具的 MCP 配置文件中添加（**不需要 `command`，用 `url`**）：
 
 ```json
 {
   "mcpServers": {
     "flashkey": {
-      "type": "stdio",
-      "command": "flashkey-mcp",
-      "args": []
+      "type": "sse",
+      "url": "http://127.0.0.1:8100/sse"
     }
   }
 }
 ```
 
-如果文件已存在且已有其他 MCP server，在 `mcpServers` 对象内追加 `"flashkey"` 条目，保留已有配置。
+配置文件路径检测：
 
-**Hermes Agent 用 YAML 格式**：
+| 工具 | 配置文件 |
+|------|---------|
+| Claude Code (CLI) | `~/.claude/mcp.json` |
+| MiMo Code | `~/.mimocode/mcp.json` |
+| Claude Desktop macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop Win | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Cline (VS Code) | `~/.cline/mcp.json` |
+| Hermes Agent | `~/.hermes/config.yaml` |
 
-```yaml
-mcp_servers:
-  flashkey:
-    command: flashkey-mcp
-    args: []
-    enabled: true
-```
+### 2d. 不需要重启 AI 工具
 
-### 第三步：验证
-
-```bash
-flashkey-mcp --help
-```
-
-应该看到 `FlashKey FK-01 MCP Server` 的帮助信息。同时确认 `flashkey-mcp` 的默认模式是 **stdio**（输出中 `--stdio` 显示为 "this is the default"）。
-
-### 第四步：告知用户
-
-> "flashkey-mcp 已安装并配置完成（stdio 模式）。MCP 框架会在 AI 工具启动时自动以 stdio 子进程方式拉起 flashkey-mcp，无需手动运行。请**重启**当前 AI 工具使配置生效。重启后插入 FlashKey FK-01，直接告诉我要烧录的固件和芯片型号即可。"
+SSE 连接是实时的。配置写入后 AI 工具会自动重连。如果工具没立即识别，手动触发 MCP 重连或等几秒。
 
 ---
 
-## 步骤 3：烧录 + 日志（MCP 工具已可用）
+## 步骤 3：触发握手 + 烧录 + 日志
 
-当 `flashkey_status()` 返回 `authed: true` 时，一句话即可完成：
+### 3a. 先触发设备发现和握手
+
+**调用 `flashkey_status()`。** 这是 MCP 连接建立后第一个应该调用的工具。它触发 DeviceManager 启动后台线程，扫描 FK-01，自动完成 HELLO 握手。调用后等 3-5 秒再调一次确认 `authed: true`。
+
+```
+flashkey_status()  → 触发 DeviceManager 初始化 → 扫描 FK-01 → HELLO 握手 → 返回 authed
+```
+
+### 3b. 烧录
+
+当 `flashkey_status()` 返回 `authed: true` 时：
 
 ### 烧录
 

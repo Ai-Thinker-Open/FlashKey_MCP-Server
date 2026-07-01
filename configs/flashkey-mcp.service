@@ -1,0 +1,22 @@
+[Unit]
+Description=FlashKey FK-01 MCP Server
+Documentation=https://github.com/Ai-Thinker-Open/flashkey-mcp
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=__FLASHKEY_MCP_BIN__ --sse --host 127.0.0.1 --port 8100
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/dev
+
+[Install]
+WantedBy=default.target
