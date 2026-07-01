@@ -15,30 +15,48 @@ BL602 使用**串口打断**方式进入 bootloader：烧录工具 `bflb_iot_too
 
 不需要 BOOT 引脚参与。CH340C 的 DTR/RTS 未引出，复位由 FK-01 RST 引脚完成。
 
-## 烧录命令
-
-使用 `flashkey_flash_monitor`：
-
-```
-flashkey_flash_monitor(
-    command="make -C <sdk_path>/applications/get-started/helloworld flash p=/dev/ttyUSB0 b=921600",
-    sdk_path="<sdk_path>/applications/get-started/helloworld"
-)
-```
-
-也可以直接使用 `flashkey_flash`（内部调用同样的 `_flash_break_mode`）：
+## 烧录方式一：串口打断（默认，make flash）
 
 ```
 flashkey_flash(
     firmware_path="/path/to/helloworld.bin",
-    flash_port="/dev/ttyUSB0",   # role=fk_flash 的端口
+    flash_port="/dev/ttyUSB0",
     chip="bl602",
     baud_rate=921600,
     sdk_path="/path/to/sdk/app"
 )
 ```
 
-`flashkey_flash` 自动完成：启动 make flash → 检测复位提示 → RST 脉冲 → 等待完成 → RST 恢复。
+自动完成：启动 make flash → 检测 `Please Press Reset Key!` → RST 脉冲 → 握手 → 烧录 → RST 恢复。
+
+## 烧录方式二：ISP 模式（make eflash）
+
+**使用场景：**
+- 芯片执行过擦除后，必须用 ISP 模式
+- `make flash` 多次超时后，改用 ISP 模式
+
+`make eflash` 不会重新编译，只执行烧录。需要模组先进入 ISP 模式（BOOT 拉高 + RST 脉冲）。
+
+```
+flashkey_flash(
+    firmware_path="/path/to/helloworld.bin",
+    flash_port="/dev/ttyUSB0",
+    chip="bl602",
+    baud_rate=921600,
+    sdk_path="/path/to/sdk/app",
+    mode="isp",
+    tool="make -C {sdk_path} eflash p={port} b={baud}"
+)
+```
+
+或用 `flashkey_flash_monitor` 手动控制：
+
+```
+flashkey_flash_monitor(
+    command="make -C <sdk_path>/app eflash p=/dev/ttyUSB0 b=921600",
+    sdk_path="<sdk_path>/app"
+)
+```
 
 ## 参数默认值
 
@@ -76,5 +94,7 @@ Ai-WB2 模组与 FK-01 连接：
 ├─ "shake hand fail" → 检查 CH340C TX/RX 交叉接线
 ├─ 串口无输出 → 检查 Ai-WB2 供电（可能需要 5V + 3.3V）
 ├─ 波特率过高 → 降为 115200
+├─ make flash 多次超时 → 尝试 ISP 模式 (make eflash, mode="isp")
+├─ 芯片擦除后 → 必须用 ISP 模式 (make eflash)
 └─ 手动验证：按住 BOOT 按键 + 按 RESET，看串口是否有 bootloader 输出
 ```
