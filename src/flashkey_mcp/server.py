@@ -261,38 +261,92 @@ def _flash_break_mode(
     sdk_path: str,
     flash_timeout: int = 120,
 ) -> tuple[bool, list[str]]:
-    """BL602 serial break mode: run flash tool, let CH340C RTS handle reset.
+    """BL602 serial break mode: run flash tool → detect prompt → RST pulse.
 
-    BL602 boot ROM detects a sync pattern on UART RX at reset.  The flash
-    tool sends this pattern, then toggles CH340C RTS to reset the chip.
-    No BOOT pin manipulation is needed — the boot ROM handles mode selection
-    based on the sync pattern alone.
+    The flash tool (bflb_iot_tool) sends a sync pattern on CH340C TX, then
+    prints "Please Press Reset Key!" and waits.  FK-01 pulses its RST pin
+    to reset the BL602 — the boot ROM detects the sync pattern at reset and
+    enters bootloader.  No BOOT pin manipulation needed.
 
-    FK-01 does nothing except provide the serial passthrough via CH340C.
+    Sequence:
+    1. Start ``make flash`` (Popen), monitor stdout
+    2. Detect "Please Press Reset Key!" prompt
+    3. Pulse FK-01 RST → BL602 resets, boot ROM enters bootloader
+    4. Wait for flash tool to complete handshake and write
+    5. Recovery: RST pulse to boot normally
 
     Returns:
         ``(success, output_lines)``.
     """
+    import threading as _threading
+
+    proc = None
     output_lines: list[str] = []
 
     try:
-        logger.info("Flashing BL602 (serial break): %s", " ".join(flash_cmd))
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             flash_cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=flash_timeout,
             cwd=sdk_path if sdk_path else None,
         )
-        if proc.stdout:
-            output_lines.append(proc.stdout)
-        if proc.stderr:
-            output_lines.append(proc.stderr)
+
+        prompt_seen = _threading.Event()
+
+        def _read_stdout():
+            try:
+                for line in iter(proc.stdout.readline, ""):
+                    if line:
+                        output_lines.append(line.rstrip("\r\n"))
+                        lower = line.lower()
+                        if any(
+                            kw in lower
+                            for kw in ("reset", "rest", "press", "uart", "复位", "please", "gpio8")
+                        ):
+                            prompt_seen.set()
+            except Exception:
+                pass
+
+        reader = _threading.Thread(target=_read_stdout, daemon=True)
+        reader.start()
+
+        # Wait for reset prompt (30 s max)
+        if not prompt_seen.wait(timeout=30):
+            logger.warning("Break mode: no reset prompt within 30 s")
+            if proc.poll() is None:
+                proc.kill()
+            reader.join(timeout=2)
+            return False, output_lines + [
+                "[错误] 未在 30 秒内检测到烧录工具的复位提示"
+            ]
+
+        logger.info("Break mode: reset prompt detected, pulsing FK-01 RST")
+        fk.commands.rst_pulse(50)
+        output_lines.append("[FlashKey] RST 脉冲已发出")
+
+        # Wait for flash tool to finish
+        remaining = flash_timeout - 30
+        try:
+            proc.wait(timeout=max(remaining, 0) or flash_timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            reader.join(timeout=2)
+            return False, output_lines + [f"[错误] 烧录超时 ({flash_timeout} 秒)"]
+
+        reader.join(timeout=3)
+
+        # Collect any remaining stderr
+        try:
+            stderr_data = proc.stderr.read()
+            if stderr_data:
+                output_lines.append(stderr_data)
+        except Exception:
+            pass
+
         success = proc.returncode == 0
         return success, output_lines
 
-    except subprocess.TimeoutExpired:
-        return False, output_lines + [f"[错误] 烧录超时 ({flash_timeout} 秒)"]
     except Exception as exc:
         logger.exception("Break mode internal error: %s", exc)
         return False, output_lines + [f"[错误] 烧录异常: {exc}"]
