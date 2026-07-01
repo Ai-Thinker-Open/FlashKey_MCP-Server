@@ -49,8 +49,9 @@ _TOTAL_HANDSHAKE_BUDGET: float = _HELLO_TIMEOUT + _HANDSHAKE_TIMEOUT
 
 # PING keepalive interval (NFR-2)
 _PING_INTERVAL: float = 2.0
-# Consecutive PING failures before declaring device lost
-_PING_MAX_FAILS: int = 2
+# Consecutive PING failures before declaring device lost.
+# Set higher to tolerate USB bus saturation during flash operations.
+_PING_MAX_FAILS: int = 10
 
 # Poll interval in seconds when inotify is unavailable (Windows / fallback)
 _FALLBACK_POLL_INTERVAL: float = 1.0
@@ -359,11 +360,7 @@ class DeviceManager:
     # ------------------------------------------------------------------
 
     def _ping_keepalive(self) -> None:
-        """Send PING every 2 s.  After 2 consecutive failures, disconnect.
-
-        PING is suppressed while ``_pause_keepalive`` is set (e.g. during
-        flash operations which saturate the USB bus).
-        """
+        """Send PING every 2 s.  After _PING_MAX_FAILS consecutive failures, disconnect."""
         fail_count = 0
         while not self._stop_event.is_set():
             fk = self._fk
@@ -372,12 +369,6 @@ class DeviceManager:
 
             if state is not DeviceState.AUTHED or fk is None:
                 return  # state changed externally
-
-            # Skip PING during flash operations — USB bus may be saturated
-            if self._pause_keepalive:
-                self._sleep_or_watch(_PING_INTERVAL)
-                fail_count = 0  # reset fail count while paused
-                continue
 
             try:
                 fk.commands.ping(read_timeout=1.0)
