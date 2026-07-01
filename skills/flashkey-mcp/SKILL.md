@@ -201,101 +201,71 @@ tail -f /tmp/flashkey-mcp.log          # 查看文件日志
 
 ## 步骤 3：触发握手 + 烧录 + 日志
 
-### 3a. 先触发设备发现和握手
+### 3a. 先确认设备状态
 
-**调用 `flashkey_status()`。** 这是 MCP 连接建立后第一个应该调用的工具。它触发 DeviceManager 启动后台线程，扫描 FK-01，自动完成 HELLO 握手。调用后等 3-5 秒再调一次确认 `authed: true`。
-
-```
-flashkey_status()  → 触发 DeviceManager 初始化 → 扫描 FK-01 → HELLO 握手 → 返回 authed
-```
+调用 `flashkey_status()` 确认 `authed: true`。DeviceManager 在 MCP 连接建立时自动启动，FK-01 插入后 5 秒内自动握手。
 
 ### 3b. 烧录
 
-当 `flashkey_status()` 返回 `authed: true` 时：
-
-### 烧录
-
 ```
-flashkey_flash(firmware_path="/path/to/firmware.bin", flash_port="自动检测的端口", chip="bl616")
+flashkey_flash(firmware_path="/path/to/firmware.bin", flash_port="fk_flash端口", chip="bl616")
 ```
 
-`flashkey_flash` 自动处理：BOOT 拉高 → RST 脉冲 → 调用 SDK make flash → 烧录完成后恢复芯片。
-
-### 烧录后看日志
+### 3c. 查看日志
 
 ```
 flashkey_log(port="同上端口", duration=5, grep="Hello World")
 ```
 
-### 烧录后芯片不启动？
-
-```
-flashkey_rst_pulse(50)
-flashkey_log(port="...", duration=5)
-```
+如果不启动：`flashkey_rst_pulse(50)` + `flashkey_log()`。
 
 ---
 
-## 烧录模式说明
+## 步骤 3：烧录 + 日志
 
-| chip | 默认 mode | 行为 |
-|------|:--------:|------|
-| `bl602` | `break` | 先启动 `make flash` → 等待复位提示 → FlashKey RST 脉冲 → 烧录 |
-| `bl616` | `isp` | BOOT↑ → RST 脉冲 → `make flash` → 恢复 |
-| `bl618` | `isp` | 同 BL616 |
+当 `flashkey_status()` 返回 `authed: true` 后：
 
-BL602 的 break 模式关键词检测（不区分大小写）：`reset`, `rest`, `press`, `uart`, `复位`。30 秒未检测到复位提示则报错，建议尝试 `mode="isp"`。
+**调用 `flashkey_flash()` 一键烧录**，FK-01 自动处理时序和恢复。
+
+**烧录后**：`flashkey_log(port, duration=5)` 验证启动日志。
 
 ---
 
-## 故障排查
+## 芯片子 skill
+
+不同芯片烧录方式和 SDK 不同。根据用户提到的芯片型号，加载对应子 skill：
+
+| 芯片 | 子 skill | 烧录方式 |
+|------|---------|---------|
+| BL602 (Ai-WB2) | `flashkey-mcp-bl602` | 串口打断 — `flashkey_flash_monitor` |
+| BL616/BL618 (Ai-M61/M62) | `flashkey-mcp-bl616-618` | ISP 模式 — `flashkey_flash` mode=isp |
+
+---
+
+## 通用故障排查
 
 ```
 flashkey_flash() 失败
-├─ flashkey_status() 先检查 authed / boot / rst / v5v / v3v3 状态
+├─ flashkey_status() 先检查 authed / boot / rst 状态
 ├─ authed: false → 拔出 FK-01 重新插入，等 5 秒
-├─ "make: No rule" → sdk_path 不对，或用 tool 参数指定
-├─ "Failed to connect" / "shake hand fail" / ROM bootloader 无响应
-│   ├─ FK-01 电源已开但 BL602 仍无响应 → 硬件连接问题，检查：
-│   │   1. CH340C TX → BL602 GPIO7(RX)、CH340C RX → BL602 GPIO16(TX) 接线
-│   │   2. Ai-WB2 模块可能需要板载 USB 独立供电，仅靠 FK-01 3.3V 可能不够
-│   │   3. 确认模块型号的电源要求（部分模组需 5V + 3.3V 同时供电）
-│   └─ 手动验证：按住 BOOT 按键 + 按 RESET → 看串口是否有 bootloader 输出
+├─ "make: No rule" → sdk_path 不对
 ├─ CH340C 被占用 → 关闭串口监视器
-├─ PING keepalive 在烧录中丢失 → 已修复：烧录期间自动暂停 PING，烧录后恢复
-└─ 烧录成功但不启动 → rst_pulse(50) + flashkey_log(port, duration=5)
+├─ 烧录成功但不启动 → flashkey_rst_pulse(50) + flashkey_log(port, duration=5)
+└─ 芯片特定问题 → 加载对应芯片子 skill
 ```
 
----
-
-## 芯片领域知识
-
-| chip | 烧录命令模板 | 默认波特率 | SDK |
-|------|------------|:--------:|-----|
-| `bl602` | `make flash p={port} b={baud}` | 921600 | Ai-Thinker-WB2 |
-| `bl616` | `make flash CHIP=bl616 COMX={port} BAUDRATE={baud}` | 2000000 | bouffalo_sdk |
-| `bl618` | `make flash CHIP=bl618 COMX={port} BAUDRATE={baud}` | 2000000 | bouffalo_sdk |
-
-### 启动日志特征
-
-| 芯片 | 正常启动关键词 | 等待时间 |
-|------|---------------|:------:|
-| BL602 | `Booting BL602...` 或 `[OS] Starting` | 1s |
-| BL616 | `Starting ...` 或 `Hello World!` | 2s |
-| BL618 | 同 BL616 | 2s |
-
-### 平台陷阱
+## 平台陷阱
 
 - **Windows COM10+**：必须写 `\\.\COM10`
-- **WSL**：FK-01 + CH340C 都需要 `usbipd` 映射
-- **串口互斥**：`flashkey_log` 和 `flashkey_flash` 共用 CH340C，不能同时调
-- **v5v 反直觉**：`v5v_set(True)` = PB1 LOW = 开启 5V（低电平有效）
+- **WSL**：FK-01 + CH340C 需要 `usbipd` 映射
+- **串口互斥**：`flashkey_log` 和 `flashkey_flash` 共用 CH340C
+- **v5v 反直觉**：`v5v_set(True)` = PB1 LOW = 开启 5V
 
-### 引脚参考
+## 引脚参考
 
-| 功能 | 引脚 | 默认 | 控制 |
-|------|------|------|------|
-| BOOT | PB3 | HIGH | `boot_set()` |
-| RST | PB4 | HIGH | `rst_set()`/`rst_pulse()` |
-| 5V_EN | PB1 | HIGH=OFF | `v5v_set()` — 低有效 |
-| 3.3V_EN | PB0 | LOW=OFF | `v3v3_set()` — 高有效 |
+| 功能 | 引脚 | 控制 |
+|------|------|------|
+| BOOT | PB3 | `boot_set()` |
+| RST | PB4 | `rst_set()`/`rst_pulse()` |
+| 5V_EN | PB1 | `v5v_set()` — 低有效 |
+| 3V3_EN | PB0 | `v3v3_set()` — 高有效 |
