@@ -261,96 +261,44 @@ def _flash_break_mode(
     sdk_path: str,
     flash_timeout: int = 120,
 ) -> tuple[bool, list[str]]:
-    """BL602 tool-first flash: BOOT HIGH → run flash tool → RST pulse on prompt.
+    """BL602 serial break mode: BOOT HIGH → run flash tool → DTR handles reset.
 
-    BL602 enters bootloader only when GPIO8 is HIGH at reset.  The sequence:
+    BL602 enters bootloader only when GPIO8 is HIGH at reset.  ``make flash``
+    uses the CH340C DTR pin to reset the chip — FK-01 just needs to hold
+    BOOT high so GPIO8 is pulled up when DTR resets.
+
+    Sequence:
     1. Set BOOT high (GPIO8 pull-up)
-    2. Start ``make flash`` → reads stdout for "Please Press Reset Key!"
-    3. Pulse RST → chip resets with GPIO8=HIGH → enters bootloader
-    4. Flash tool handshakes with bootloader → writes firmware
-    5. Recovery: BOOT low + RST pulse (boot normally)
+    2. Run ``make flash`` — the flash tool controls DTR to reset and handshake
+    3. Recovery: BOOT low + RST pulse (boot normally)
 
     Returns:
         ``(success, output_lines)``.
     """
-    import threading as _threading
-
-    # Step 1: BOOT high so BL602 enters bootloader on reset
-    fk.commands.boot_set(True)
-    output_lines: list[str] = ["[FlashKey] BOOT 拉高，进入 tool-first 烧录模式"]
-    proc = None
+    output_lines: list[str] = ["[FlashKey] BOOT 拉高，DTR 由 CH340C 控制"]
 
     try:
-        proc = subprocess.Popen(
+        # Step 1: BOOT high so BL602 enters bootloader on DTR reset
+        fk.commands.boot_set(True)
+
+        # Step 2: Run make flash — the tool handles reset via DTR
+        logger.info("Flashing BL602 (serial break): %s", " ".join(flash_cmd))
+        proc = subprocess.run(
             flash_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
+            timeout=flash_timeout,
             cwd=sdk_path if sdk_path else None,
         )
-
-        prompt_seen = _threading.Event()
-        prompt_found = [False]  # mutable box for reader thread
-
-        # ── Reader thread: captures stdout, watches for reset prompt ──
-        def _read_stdout():
-            try:
-                for line in iter(proc.stdout.readline, ""):
-                    if line:
-                        output_lines.append(line.rstrip("\r\n"))
-                        if not prompt_found[0]:
-                            lower = line.lower()
-                            if any(
-                                kw in lower
-                                for kw in ("reset", "rest", "press", "uart", "复位", "please", "gpio8")
-                            ):
-                                prompt_found[0] = True
-                                prompt_seen.set()
-            except Exception:
-                pass
-
-        reader = _threading.Thread(target=_read_stdout, daemon=True)
-        reader.start()
-
-        # ── Wait for reset prompt (30 s max) ─────────────────────────
-        if not prompt_seen.wait(timeout=30):
-            logger.warning("Break mode: no reset prompt within 30 s")
-            if proc.poll() is None:
-                proc.kill()
-            reader.join(timeout=2)
-            return False, output_lines + [
-                "[错误] 未在 30 秒内检测到烧录工具的复位提示，请尝试 mode='isp'"
-            ]
-
-        logger.info("Break mode: reset prompt detected, pulsing RST")
-
-        # ── PULSE RST to trigger bootloader ───────────────────────────
-        fk.commands.rst_pulse(50)
-        output_lines.append("[FlashKey] RST 脉冲已发出")
-        time.sleep(0.3)
-
-        # ── Wait for flash tool to finish ─────────────────────────────
-        remaining = flash_timeout - 30
-        try:
-            proc.wait(timeout=max(remaining, 0) or flash_timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            reader.join(timeout=2)
-            return False, output_lines + ["[错误] 烧录超时 (120 秒)"]
-
-        reader.join(timeout=3)
-
-        # Read any remaining stderr
-        try:
-            stderr_data = proc.stderr.read()
-            if stderr_data:
-                output_lines.append(stderr_data)
-        except Exception:
-            pass
-
+        if proc.stdout:
+            output_lines.append(proc.stdout)
+        if proc.stderr:
+            output_lines.append(proc.stderr)
         success = proc.returncode == 0
         return success, output_lines
 
+    except subprocess.TimeoutExpired:
+        return False, output_lines + [f"[错误] 烧录超时 ({flash_timeout} 秒)"]
     except Exception as exc:
         logger.exception("Break mode internal error: %s", exc)
         return False, output_lines + [f"[错误] 烧录异常: {exc}"]
@@ -852,9 +800,9 @@ mcp.add_tool(
         "不要根据端口名猜测角色，不同系统上名字不同 (COMx / ttyACMx / ttyUSBx / cu.*)。\n"
         "\n"
         "支持两种烧录模式:\n"
-        "  BL602: 始终使用 tool-first 时序 (先跑烧录工具 → 等待复位提示 → FlashKey RST 脉冲 → 烧录完成)。\n"
-        "         因为 BL602 bootloader 要求工具先运行再复位，否则握手窗口会错过。\n"
-        "         mode 参数对 BL602 无效，始终走相同的 tool-first 流程。\n"
+        "  BL602: 串口打断模式 (BOOT 拉高 → make flash 通过 DTR 复位并握手 → 烧录完成)。\n"
+        "         FK-01 只控制 BOOT，复位由 CH340C 的 DTR 处理。\n"
+        "         mode 参数对 BL602 无效。\n"
         "  BL616/BL618 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
