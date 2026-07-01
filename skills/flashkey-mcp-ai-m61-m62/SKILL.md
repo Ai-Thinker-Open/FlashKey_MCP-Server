@@ -1,11 +1,11 @@
 ---
-name: flashkey-mcp-bl616-618
-description: FlashKey FK-01 — BL616/BL618 (Ai-M61/M62) ISP 烧录。BOOT+RST 进入 ISP 模式、bouffalo_sdk。
+name: flashkey-mcp-ai-m61-m62
+description: FlashKey FK-01 — Ai-M61/M62 (BL616/BL618) ISP 烧录。BOOT+RST、bouffalo_sdk。
 ---
 
-# FlashKey FK-01 — BL616/BL618 (Ai-M61/M62) 烧录指南
+# FlashKey FK-01 — Ai-M61/M62 烧录指南
 
-> **当用户提到 BL616、BL618、Ai-M61、Ai-M62、M61、M62 烧录时，加载本 skill。**
+> **当用户提到 Ai-M61、Ai-M62、M61、M62、BL616、BL618 烧录时，加载本 skill。**
 
 ---
 

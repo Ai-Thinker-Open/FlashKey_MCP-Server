@@ -235,10 +235,10 @@ flashkey_log(port="同上端口", duration=5, grep="Hello World")
 
 不同芯片烧录方式和 SDK 不同。根据用户提到的芯片型号，加载对应子 skill：
 
-| 芯片 | 子 skill | 烧录方式 |
-|------|---------|---------|
-| BL602 (Ai-WB2) | `flashkey-mcp-bl602` | 串口打断 — `flashkey_flash_monitor` |
-| BL616/BL618 (Ai-M61/M62) | `flashkey-mcp-bl616-618` | ISP 模式 — `flashkey_flash` mode=isp |
+| 模组 | 芯片 | 子 skill | 烧录方式 |
+|------|------|---------|---------|
+| Ai-WB2 | BL602 | `flashkey-mcp-ai-wb2` | 串口打断 |
+| Ai-M61/M62 | BL616/BL618 | `flashkey-mcp-ai-m61-m62` | ISP 模式 |
 
 ---
 

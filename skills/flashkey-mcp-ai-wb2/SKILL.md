@@ -1,11 +1,11 @@
 ---
-name: flashkey-mcp-bl602
-description: FlashKey FK-01 — BL602 (Ai-WB2) 串口打断烧录。串口打断模式、flashkey_flash_monitor 使用、Ai-Thinker-WB2 SDK。
+name: flashkey-mcp-ai-wb2
+description: FlashKey FK-01 — Ai-WB2 (BL602) 串口打断烧录。flashkey_flash_monitor、Ai-Thinker-WB2 SDK。
 ---
 
-# FlashKey FK-01 — BL602 (Ai-WB2) 烧录指南
+# FlashKey FK-01 — Ai-WB2 烧录指南
 
-> **当用户提到 BL602、Ai-WB2、WB2 烧录时，加载本 skill。**
+> **当用户提到 Ai-WB2、WB2、BL602 烧录时，加载本 skill。**
 
 ---
 
