@@ -76,7 +76,7 @@ pip install starlette uvicorn
 
 ## 步骤 2：选择运行模式
 
-flashkey-mcp 支持两种运行模式，选其中一种即可。**关键：config 格式必须和运行模式匹配。**
+flashkey-mcp 支持两种运行模式。**只能选一种，不能同时跑。** 两个进程会争抢 FK-01 串口，导致其中一个 `device busy`。关键是 config 格式必须和运行模式匹配。
 
 ### 路径 A：SSE 服务模式（推荐 — 服务独立运行，开机自启）
 
@@ -107,11 +107,11 @@ MCP config：
 
 AI 工具启动时自动拉起 flashkey-mcp 子进程。每次重启 AI 工具都会重建连接和握手。
 
-### ⚠️ 模式不能混用
+### ⚠️ 模式不能混用，也不能同时跑
 
-- SSE 服务的 config 用 `"url"`，不能用 `"command"`
-- stdio 模式的 config 用 `"command"`，不能用 `"url"`
-- 如果服务是 SSE 模式但 config 写了 stdio → 工具不可用
+- SSE 服务 + stdio config → 工具不可用（config 不匹配）
+- 同时配了 SSE 服务 AND stdio config → 两个 flashkey-mcp 进程抢串口，必有一个报 `device busy`
+- 切换模式时：先停掉旧的（`--service uninstall` 或删 MCP config），再启新的
 
 ### 配置文件位置
 
