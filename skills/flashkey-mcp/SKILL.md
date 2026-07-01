@@ -154,12 +154,26 @@ MCP config：
 - 同时配了 SSE 服务 AND stdio config → 两个 flashkey-mcp 进程抢串口，必有一个报 `device busy`
 - 切换模式时：先停掉旧的（`--service uninstall` 或删 MCP config），再启新的
 
-### 配置文件位置
+### ⚠️ MiMo Code：用命令，别手动编辑
+
+MiMo Code 有自己的 MCP 管理，不要手动编辑 JSON 文件。AI 应该执行：
+
+```bash
+mimo mcp add flashkey --command /home/seahi/.local/bin/flashkey-mcp
+```
+
+如果 `which flashkey-mcp` 找得到，也可以不带路径：
+
+```bash
+mimo mcp add flashkey --command flashkey-mcp
+```
+
+### 配置文件位置（其他工具）
 
 | 工具 | 配置文件 |
 |------|---------|
-| Claude Code / MiMo Code | `~/.claude/.mcp.json` |
-| MiMo Code (备用) | `~/.mimocode/mcp.json` |
+| Claude Code | `~/.claude/.mcp.json` |
+| MiMo Code | 用 `mimo mcp add` 命令添加，不要手动编辑 JSON |
 | Claude Desktop macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop Win | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Cline (VS Code) | `~/.cline/mcp.json` |
