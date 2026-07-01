@@ -154,26 +154,34 @@ MCP config：
 - 同时配了 SSE 服务 AND stdio config → 两个 flashkey-mcp 进程抢串口，必有一个报 `device busy`
 - 切换模式时：先停掉旧的（`--service uninstall` 或删 MCP config），再启新的
 
-### ⚠️ MiMo Code：用命令，别手动编辑
+### MiMo Code：项目级配置
 
-MiMo Code 有自己的 MCP 管理，不要手动编辑 JSON 文件。AI 应该执行：
+MiMo Code 在每个项目的根目录用 `mimocode.json` 配置 MCP，格式不同：
 
-```bash
-mimo mcp add flashkey --command /home/seahi/.local/bin/flashkey-mcp
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "flashkey-mcp": {
+      "type": "local",
+      "command": ["flashkey-mcp"]
+    }
+  }
+}
 ```
 
-如果 `which flashkey-mcp` 找得到，也可以不带路径：
+关键差异：顶层 key 是 `"mcp"`（不是 `"mcpServers"`）、`"type": "local"`（不是 `"stdio"`）、`"command"` 是数组。
 
-```bash
-mimo mcp add flashkey --command flashkey-mcp
-```
+如果文件已存在其他 MCP server，在 `"mcp"` 对象内追加，保留已有条目。
+
+也可以用 CLI：`mimo mcp add flashkey-mcp --command flashkey-mcp`
 
 ### 配置文件位置（其他工具）
 
 | 工具 | 配置文件 |
 |------|---------|
 | Claude Code | `~/.claude/.mcp.json` |
-| MiMo Code | 用 `mimo mcp add` 命令添加，不要手动编辑 JSON |
+| MiMo Code | 项目根目录 `mimocode.json` — 格式不同，见上方 |
 | Claude Desktop macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop Win | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Cline (VS Code) | `~/.cline/mcp.json` |
