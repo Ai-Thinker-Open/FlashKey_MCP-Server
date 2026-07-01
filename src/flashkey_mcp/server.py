@@ -883,6 +883,29 @@ mcp.add_tool(
 # Entry point
 # ======================================================================
 
+def _handle_upgrade() -> None:
+    """Upgrade flashkey-mcp to latest version from GitHub."""
+    from flashkey_mcp import __version__
+
+    print(f"Current version: {__version__}")
+    print("Upgrading from GitHub...")
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pip", "install", "--upgrade",
+            "git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git",
+        ],
+        capture_output=False,
+    )
+    if result.returncode != 0:
+        print("Upgrade failed. Try manually:")
+        print("  pip install --upgrade git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git")
+        sys.exit(1)
+
+    print("Upgrade complete. Restarting service...")
+    subprocess.run(["systemctl", "--user", "restart", "flashkey-mcp"], capture_output=True)
+    print("Service restarted. Check status: flashkey-mcp --service status")
+
+
 def _handle_service_command(action: str) -> None:
     """Install / uninstall / check status of systemd user service."""
     import shutil
@@ -941,7 +964,23 @@ def _handle_service_command(action: str) -> None:
         _sp.run(["systemctl", "--user", "daemon-reload"], check=True)
         _sp.run(["systemctl", "--user", "enable", service_name], check=True)
         _sp.run(["systemctl", "--user", "start", service_name], check=True)
+
+        # Also install auto-upgrade timer (daily)
+        for fname in ("flashkey-mcp-upgrade.service", "flashkey-mcp-upgrade.timer"):
+            src = unit_file.parent / fname
+            if src.exists():
+                dst = user_unit_dir / fname
+                content = src.read_text().replace("__FLASHKEY_MCP_BIN__", fk_bin)
+                dst.write_text(content)
+        _sp.run(["systemctl", "--user", "daemon-reload"], check=True)
+        _sp.run(
+            ["systemctl", "--user", "enable", "--now", "flashkey-mcp-upgrade.timer"],
+            check=True,
+        )
+
         print("Service started. SSE endpoint: http://127.0.0.1:8100/sse")
+        print("Auto-upgrade: daily check enabled")
+        print("Manual upgrade: flashkey-mcp --upgrade")
         print("MCP config to use in AI tool:")
         print('  {"flashkey": {"type": "sse", "url": "http://127.0.0.1:8100/sse"}}')
         return
@@ -949,10 +988,13 @@ def _handle_service_command(action: str) -> None:
     if action == "uninstall":
         _sp.run(["systemctl", "--user", "stop", service_name], capture_output=True)
         _sp.run(["systemctl", "--user", "disable", service_name], capture_output=True)
-        unit = user_unit_dir / f"{service_name}.service"
-        if unit.exists():
-            unit.unlink()
-            print(f"Removed: {unit}")
+        # Also remove upgrade timer
+        _sp.run(["systemctl", "--user", "disable", "--now", "flashkey-mcp-upgrade.timer"], capture_output=True)
+        for fname in (f"{service_name}.service", "flashkey-mcp-upgrade.service", "flashkey-mcp-upgrade.timer"):
+            unit = user_unit_dir / fname
+            if unit.exists():
+                unit.unlink()
+                print(f"Removed: {unit}")
         _sp.run(["systemctl", "--user", "daemon-reload"], check=True)
         print("Service uninstalled.")
         return
@@ -1010,7 +1052,26 @@ def main() -> None:
         "--service", type=str, choices=["install", "uninstall", "status"],
         help="Manage systemd user service (install/uninstall/status)",
     )
+    parser.add_argument(
+        "--upgrade", action="store_true",
+        help="Upgrade flashkey-mcp to latest version from GitHub",
+    )
+    parser.add_argument(
+        "--version", action="store_true",
+        help="Show version and exit",
+    )
     args = parser.parse_args()
+
+    # -- Version ---------------------------------------------------------
+    if args.version:
+        from flashkey_mcp import __version__
+        print(f"flashkey-mcp {__version__}")
+        return
+
+    # -- Upgrade ----------------------------------------------------------
+    if args.upgrade:
+        _handle_upgrade()
+        return
 
     # -- Service management commands --------------------------------------
     if args.service:

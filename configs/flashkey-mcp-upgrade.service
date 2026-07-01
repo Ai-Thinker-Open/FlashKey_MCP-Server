@@ -1,0 +1,9 @@
+[Unit]
+Description=FlashKey MCP auto-upgrade
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=__FLASHKEY_MCP_BIN__ --upgrade
+StandardOutput=journal
+StandardError=journal
