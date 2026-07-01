@@ -1117,7 +1117,8 @@ def main() -> None:
         try:
             mcp.run(transport="stdio")
         finally:
-            dm.stop()
+            if _dm is not None:
+                _dm.stop()
 
 
 def _run_sse(host: str, port: int) -> None:
@@ -1175,7 +1176,8 @@ def _run_sse(host: str, port: int) -> None:
     try:
         uvicorn.run(app, host=host, port=port, log_level="info")
     finally:
-        dm.stop()
+        if _dm is not None:
+            _dm.stop()
 
 
 if __name__ == "__main__":
