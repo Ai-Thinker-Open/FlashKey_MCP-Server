@@ -801,6 +801,70 @@ mcp.add_tool(
     description="读取 3.3V 电源当前状态。需要认证。",
 )
 
+# ── flashkey_flash_monitor ─────────────────────────────────────────
+
+def _tool_flash_monitor(
+    command: str,
+    sdk_path: str = "",
+    flash_timeout: int = 120,
+) -> dict:
+    """Run a flash command, monitor stdout for 'Please Press Reset Key!',
+    pulse FK-01 RST to trigger bootloader, wait for completion.
+
+    This is the low-level building block for BL602 serial break mode.
+    The command runs in a subprocess, FK-01 watches stdout for the reset
+    prompt, then pulses RST at the right moment.
+
+    Args:
+        command: Shell command to run (e.g. 'make -C /path flash p=/dev/ttyUSB0 b=921600')
+        sdk_path: Working directory for the command
+        flash_timeout: Max seconds to wait (default 120)
+    """
+    dm, fk = _require_fk()
+
+    # Acquire flash lock
+    if not _flash_lock.acquire(blocking=False):
+        raise ToolError("烧录进行中，请等待当前烧录完成后再试")
+
+    global _flash_active_port, _flash_cleanup_needed, _flash_cleanup_dm
+    dm.pause_keepalive()
+    _flash_cleanup_needed = True
+    _flash_cleanup_dm = dm
+
+    try:
+        flash_cmd = command.split()
+        success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path, flash_timeout)
+    finally:
+        _flash_cleanup_needed = False
+        try:
+            fk.commands.rst_pulse(50)
+        except Exception as exc:
+            output_lines.append(f"[警告] 复位失败: {exc}")
+        _flash_lock.release()
+        dm.resume_keepalive()
+
+    return {
+        "success": success,
+        "output": "\n".join(output_lines),
+    }
+
+
+mcp.add_tool(
+    _tool_wrapper(_tool_flash_monitor),
+    name="flashkey_flash_monitor",
+    description=(
+        "🔍 运行烧录命令并监控输出，检测到复位提示时自动通过 FK-01 RST 引脚复位芯片。\n"
+        "用于 BL602 串口打断烧录模式：make flash 先发 sync 信号，然后打印复位提示等待用户复位，\n"
+        "此工具自动检测提示并发送 RST 脉冲，烧录完成后再次复位使芯片正常启动。\n"
+        "参数:\n"
+        "  command: 烧录命令 (如 'make -C /path flash p=/dev/ttyUSB0 b=921600')\n"
+        "  sdk_path: 命令执行的工作目录\n"
+        "  flash_timeout: 超时秒数，默认 120\n"
+        "返回: success(是否成功)、output(命令完整输出)\n"
+        "需要认证。"
+    ),
+)
+
 # Version & UID
 mcp.add_tool(
     _tool_wrapper(_tool_get_version),
