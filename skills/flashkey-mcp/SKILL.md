@@ -158,8 +158,8 @@ MCP config：
 
 | 工具 | 配置文件 |
 |------|---------|
-| Claude Code (CLI) | `~/.claude/mcp.json` |
-| MiMo Code | `~/.mimocode/mcp.json` |
+| Claude Code / MiMo Code | `~/.claude/.mcp.json` |
+| MiMo Code (备用) | `~/.mimocode/mcp.json` |
 | Claude Desktop macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop Win | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Cline (VS Code) | `~/.cline/mcp.json` |
