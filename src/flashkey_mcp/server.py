@@ -372,7 +372,7 @@ def _tool_flash(
     start_time = time.monotonic()
     output_lines: list[str] = []
 
-    # ── BREAK mode (serial interrupt / 串口打断) ─────────────────────
+    # ── BREAK mode (BL602 serial interrupt — CH340C RTS handles reset) ──
     if mode == "break":
         _flash_cleanup_needed = True
         _flash_cleanup_dm = dm
@@ -381,11 +381,8 @@ def _tool_flash(
             success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path)
         finally:
             _flash_cleanup_needed = False
-            try:
-                fk.commands.rst_pulse(50)
-            except Exception as exc:
-                logger.error("Target recovery failed: %s", exc)
-                output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
+            # CH340C RTS handles reset for BL602 — FK-01 RST pin not used.
+            # The flash tool (bflb_iot_tool) toggles RTS at end of flash.
             _flash_active_port = ""
             _flash_lock.release()
             dm.resume_keepalive()
@@ -399,7 +396,7 @@ def _tool_flash(
             "mode": mode,
         }
 
-    # ── BL602: serial break mode (no BOOT/RST, CH340C handles it) ────
+    # ── BL602: serial break mode (no FK-01 pins, CH340C handles it) ──
     if chip == "bl602":
         _flash_cleanup_needed = True
         _flash_cleanup_dm = dm
@@ -408,11 +405,6 @@ def _tool_flash(
             success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path)
         finally:
             _flash_cleanup_needed = False
-            try:
-                fk.commands.rst_pulse(50)
-            except Exception as exc:
-                logger.error("Target recovery failed: %s", exc)
-                output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
             _flash_active_port = ""
             _flash_lock.release()
             dm.resume_keepalive()
