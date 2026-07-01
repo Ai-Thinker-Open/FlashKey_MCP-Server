@@ -261,18 +261,24 @@ def _flash_break_mode(
     sdk_path: str,
     flash_timeout: int = 120,
 ) -> tuple[bool, list[str]]:
-    """Serial break mode: run flash tool → wait for reset prompt → RST pulse.
+    """BL602 tool-first flash: BOOT HIGH → run flash tool → RST pulse on prompt.
 
-    Used by BL602 (default) where ``make flash`` starts first, prints a
-    "please reset" prompt, then FK-01 pulses RST to trigger the bootloader.
+    BL602 enters bootloader only when GPIO8 is HIGH at reset.  The sequence:
+    1. Set BOOT high (GPIO8 pull-up)
+    2. Start ``make flash`` → reads stdout for "Please Press Reset Key!"
+    3. Pulse RST → chip resets with GPIO8=HIGH → enters bootloader
+    4. Flash tool handshakes with bootloader → writes firmware
+    5. Recovery: BOOT low + RST pulse (boot normally)
 
     Returns:
         ``(success, output_lines)``.
     """
     import threading as _threading
 
+    # Step 1: BOOT high so BL602 enters bootloader on reset
+    fk.commands.boot_set(True)
+    output_lines: list[str] = ["[FlashKey] BOOT 拉高，进入 tool-first 烧录模式"]
     proc = None
-    output_lines: list[str] = []
 
     try:
         proc = subprocess.Popen(
