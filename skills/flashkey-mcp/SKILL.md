@@ -90,23 +90,36 @@ pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey
 ### 1b. 安装 flashkey-mcp
 
 ```bash
-pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
+pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
 ```
 
-如果失败（网络/权限），分两步：
+如果失败，检查 Python 版本（必须 >= 3.10），或尝试：
 
 ```bash
-pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
-pip install starlette uvicorn
+pip install --user git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
 ```
 
 ---
 
 ## 步骤 2：选择运行模式
 
-flashkey-mcp 支持两种运行模式。**只能选一种，不能同时跑。** 两个进程会争抢 FK-01 串口，导致其中一个 `device busy`。关键是 config 格式必须和运行模式匹配。
+flashkey-mcp 支持两种运行模式。**只能选一种，不能同时跑。** 两个进程会争抢 FK-01 串口，导致其中一个 `device busy`。config 格式必须和运行模式匹配。
 
-### 路径 A：SSE 服务模式（推荐 — 服务独立运行，开机自启）
+### 路径 A：stdio 模式（默认 — 兼容所有 AI 工具）
+
+```bash
+pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
+```
+
+MCP config（不要写死路径，用命令名）：
+
+```json
+{"flashkey": {"type": "stdio", "command": "flashkey-mcp", "args": []}}
+```
+
+AI 工具启动时自动拉起 flashkey-mcp 子进程。重启后生效。**所有 AI 工具都支持 stdio。**
+
+### 路径 B：SSE 服务模式（服务独立运行，开机自启，需工具支持 SSE）
 
 ```bash
 pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
@@ -119,21 +132,7 @@ MCP config：
 {"flashkey": {"type": "sse", "url": "http://127.0.0.1:8100/sse"}}
 ```
 
-优点：服务独立于 AI 工具，重启工具不需要重启服务，设备状态保持。
-
-### 路径 B：stdio 模式（AI 工具管理进程）
-
-```bash
-pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
-```
-
-MCP config：
-
-```json
-{"flashkey": {"type": "stdio", "command": "flashkey-mcp", "args": []}}
-```
-
-AI 工具启动时自动拉起 flashkey-mcp 子进程。每次重启 AI 工具都会重建连接和握手。
+优点：服务独立，重启 AI 工具不丢失设备状态。**需要 AI 工具支持 SSE 传输。**
 
 ### ⚠️ 模式不能混用，也不能同时跑
 
