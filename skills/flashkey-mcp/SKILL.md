@@ -67,30 +67,44 @@ FlashKey FK-01 是双芯片设备，插上后系统会出现**两个**串口。*
 python3 --version
 ```
 
-- **>= 3.10** → 继续 1b
-- **< 3.10** → 需要安装 Python 3.10+：
-
-| 系统 | 安装方式 |
-|------|---------|
-| Ubuntu/Debian | `sudo apt install python3.12 python3.12-venv` |
-| macOS | `brew install python@3.12` |
-| Windows | `winget install Python.Python.3.12` 或 https://www.python.org/downloads/ |
-
-安装后用 `python3.12 -m pip install ...` 代替 `pip install ...`。
-
-如果系统有多个 Python 版本但默认不是 3.10+，先创建 venv：
+- **>= 3.10** → 用 `pip install` / `python3 -m pip install`，继续 1b
+- **< 3.10** → 先检查有没有其他 Python 版本：
 
 ```bash
-python3.12 -m venv /tmp/fk-venv
-source /tmp/fk-venv/bin/activate
-pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
-# 后续 flashkey-mcp 命令都在这个 venv 里运行
+python3.11 --version 2>/dev/null || python3.12 --version 2>/dev/null || python3.10 --version 2>/dev/null
 ```
+
+如果有 3.10+，所有命令用该版本代替，例如 `python3.11 -m pip install ...`。
+
+如果都没有，安装 Python 3.10+：
+
+| 系统 | 命令 |
+|------|------|
+| Ubuntu/Debian | `sudo apt install python3.12 python3.12-venv` |
+| macOS | `brew install python@3.12` |
+| Windows | `winget install Python.Python.3.12` |
+
+安装后用 `python3.12 -m pip install ...` 代替 `pip install ...`。
 
 ### 1b. 安装 flashkey-mcp
 
 ```bash
 pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
+```
+
+安装后验证：
+
+```bash
+which flashkey-mcp && flashkey-mcp --version
+```
+
+如果 `which flashkey-mcp` 找不到（pip 装到了非 PATH 目录），链接到 PATH：
+
+```bash
+# 找到 flashkey-mcp 的实际位置
+find / -name flashkey-mcp -type f 2>/dev/null | head -3
+# 链接到 ~/.local/bin
+ln -sf <实际路径> ~/.local/bin/flashkey-mcp
 ```
 
 如果失败，检查 Python 版本（必须 >= 3.10），或尝试：
