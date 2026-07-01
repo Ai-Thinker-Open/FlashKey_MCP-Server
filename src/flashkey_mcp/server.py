@@ -358,8 +358,8 @@ def _flash_break_mode(
 # ── Chip → default mode ──────────────────────────────────────────────
 
 _FLASH_DEFAULT_MODE: dict[str, str] = {
-    # BL602: serial break by default. ISP mode (BOOT+RST) for make eflash
-    #        after chip erase or when serial break times out.
+    # BL602: always tool-first (flash tool runs first, RST pulse on prompt).
+    # BL616/BL618: BOOT+RST first, then flash tool.
     "bl602": "break",
     "bl616": "isp",
     "bl618": "isp",
@@ -452,40 +452,17 @@ def _tool_flash(
             "mode": mode,
         }
 
-    # ── BL602 ISP mode (BOOT+RST, e.g. after erase or flash timeout) ──
-    if chip == "bl602" and mode == "isp":
+    # ── BL602 with mode=isp (still uses serial break, same as above) ──
+    if chip == "bl602":
         _flash_cleanup_needed = True
         _flash_cleanup_dm = dm
 
         try:
-            # ISP mode: BOOT HIGH → RST pulse → run flash tool
-            fk.commands.boot_set(True)
-            fk.commands.rst_pulse(50)
-            time.sleep(0.2)
-
-            logger.info("Flashing BL602 (ISP): %s", " ".join(flash_cmd))
-            output_lines.append("[FlashKey] BOOT 拉高 + RST 脉冲，进入 ISP 模式")
-
-            proc = subprocess.run(
-                flash_cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=sdk_path if sdk_path else None,
-            )
-            if proc.stdout:
-                output_lines.append(proc.stdout)
-            if proc.stderr:
-                output_lines.append(proc.stderr)
-            success = proc.returncode == 0
-        except subprocess.TimeoutExpired:
-            success = False
-            output_lines.append("[错误] 烧录超时 (120 秒)")
+            success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path)
         finally:
             _flash_cleanup_needed = False
             try:
                 fk.commands.rst_pulse(50)
-                fk.commands.boot_set(False)
             except Exception as exc:
                 logger.error("Target recovery failed: %s", exc)
                 output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
@@ -924,8 +901,9 @@ mcp.add_tool(
         "不要根据端口名猜测角色，不同系统上名字不同 (COMx / ttyACMx / ttyUSBx / cu.*)。\n"
         "\n"
         "支持两种烧录模式:\n"
-        "  BL602: 默认串口打断 (make flash)。擦除后或超时时用 mode=isp (make eflash,\n"
-        "         BOOT↑ + RST 脉冲进入 ISP 模式再烧录)。\n"
+        "  BL602: 串口打断模式 (BOOT 拉高 → make flash 通过 DTR 复位并握手 → 烧录完成)。\n"
+        "         FK-01 只控制 BOOT，复位由 CH340C 的 DTR 处理。\n"
+        "         mode 参数对 BL602 无效。\n"
         "  BL616/BL618 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
