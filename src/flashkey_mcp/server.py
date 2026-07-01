@@ -261,27 +261,21 @@ def _flash_break_mode(
     sdk_path: str,
     flash_timeout: int = 120,
 ) -> tuple[bool, list[str]]:
-    """BL602 serial break mode: BOOT HIGH → run flash tool → DTR handles reset.
+    """BL602 serial break mode: run flash tool, let CH340C RTS handle reset.
 
-    BL602 enters bootloader only when GPIO8 is HIGH at reset.  ``make flash``
-    uses the CH340C DTR pin to reset the chip — FK-01 just needs to hold
-    BOOT high so GPIO8 is pulled up when DTR resets.
+    BL602 boot ROM detects a sync pattern on UART RX at reset.  The flash
+    tool sends this pattern, then toggles CH340C RTS to reset the chip.
+    No BOOT pin manipulation is needed — the boot ROM handles mode selection
+    based on the sync pattern alone.
 
-    Sequence:
-    1. Set BOOT high (GPIO8 pull-up)
-    2. Run ``make flash`` — the flash tool controls DTR to reset and handshake
-    3. Recovery: BOOT low + RST pulse (boot normally)
+    FK-01 does nothing except provide the serial passthrough via CH340C.
 
     Returns:
         ``(success, output_lines)``.
     """
-    output_lines: list[str] = ["[FlashKey] BOOT 拉高，DTR 由 CH340C 控制"]
+    output_lines: list[str] = []
 
     try:
-        # Step 1: BOOT high so BL602 enters bootloader on DTR reset
-        fk.commands.boot_set(True)
-
-        # Step 2: Run make flash — the tool handles reset via DTR
         logger.info("Flashing BL602 (serial break): %s", " ".join(flash_cmd))
         proc = subprocess.run(
             flash_cmd,
@@ -389,7 +383,6 @@ def _tool_flash(
             _flash_cleanup_needed = False
             try:
                 fk.commands.rst_pulse(50)
-                fk.commands.boot_set(False)
             except Exception as exc:
                 logger.error("Target recovery failed: %s", exc)
                 output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
@@ -406,11 +399,7 @@ def _tool_flash(
             "mode": mode,
         }
 
-    # ── BL602: always use tool-first approach ─────────────────────────
-    # BL602 bootloader requires the flash tool to be running BEFORE the
-    # reset — otherwise the bootloader window closes before the tool can
-    # handshake.  Both "break" and "isp" modes use the same flow:
-    #   start flash tool → wait for reset prompt → RST pulse → wait for completion
+    # ── BL602: serial break mode (no BOOT/RST, CH340C handles it) ────
     if chip == "bl602":
         _flash_cleanup_needed = True
         _flash_cleanup_dm = dm
@@ -421,7 +410,6 @@ def _tool_flash(
             _flash_cleanup_needed = False
             try:
                 fk.commands.rst_pulse(50)
-                fk.commands.boot_set(False)
             except Exception as exc:
                 logger.error("Target recovery failed: %s", exc)
                 output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
