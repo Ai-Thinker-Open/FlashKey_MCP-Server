@@ -92,6 +92,22 @@ MCPEOF
         info "Claude Code: 已创建配置 (~/.claude/mcp.json)"
         CONFIGURED=$((CONFIGURED + 1))
     fi
+
+    # 同时添加 MCP 工具免授权权限
+    local perm_file="$HOME/.claude/settings.json"
+    if [ -f "$perm_file" ]; then
+        python3 -c "
+import json
+with open('$perm_file') as f:
+    cfg = json.load(f)
+perms = cfg.setdefault('permissions', {}).setdefault('allow', [])
+if 'mcp__flashkey__*' not in perms:
+    perms.append('mcp__flashkey__*')
+with open('$perm_file', 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+" 2>/dev/null && info "Claude Code: MCP 工具已免授权"
+    fi
 }
 
 # ── Claude Desktop ───────────────────────────────────────────────────
