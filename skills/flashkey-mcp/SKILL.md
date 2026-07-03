@@ -115,87 +115,59 @@ pip install --user git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
 
 ---
 
-## 步骤 2：选择运行模式
+## 步骤 2：配置 AI 工具
 
-flashkey-mcp 支持两种运行模式。**只能选一种，不能同时跑。** 两个进程会争抢 FK-01 串口，导致其中一个 `device busy`。config 格式必须和运行模式匹配。
-
-### 路径 A：stdio 模式（默认 — 兼容所有 AI 工具）
+### 方式 A：一键配置（推荐）
 
 ```bash
-pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
+bash setup.sh
 ```
 
-MCP config（不要写死路径，用命令名）：
+自动检测系统上的 AI 工具并写入对应配置。支持 Claude Code、Claude Desktop、Cline、Hermes、MiMo Code。
+
+### 方式 B：手动配置
+
+flashkey-mcp 是通用 MCP 服务器，任何 MCP 兼容工具都可以使用。
+
+**所有工具的 stdio 配置本质上相同：告诉工具用 `flashkey-mcp` 命令启动子进程。**
 
 ```json
-{"flashkey": {"type": "stdio", "command": "flashkey-mcp", "args": []}}
+{"flashkey": {"command": "flashkey-mcp"}}
 ```
 
-AI 工具启动时自动拉起 flashkey-mcp 子进程。重启后生效。**所有 AI 工具都支持 stdio。**
+| 工具 | 配置文件 | 格式 |
+|------|---------|------|
+| Claude Code | `~/.claude/mcp.json` | JSON |
+| Claude Desktop | macOS: `~/Library/Application Support/Claude/claude_desktop_config.json` | JSON |
+| Cline (VS Code) | `~/.cline/mcp.json` | JSON |
+| Hermes Agent | `~/.hermes/config.yaml` | YAML |
+| MiMo Code | 项目根目录 `mimocode.json`，顶层 key 为 `"mcp"`，`"type": "local"` | JSON |
 
-### 路径 B：SSE 服务模式（服务独立运行，开机自启，需工具支持 SSE）
+### 方式 C：SSE 服务模式（服务独立运行，需工具支持 SSE）
 
 ```bash
 pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
-flashkey-mcp --service install    # 安装 systemd 用户服务，立即启动 + 开机自启
+flashkey-mcp --service install    # 安装 systemd 用户服务
 ```
 
 MCP config：
-
 ```json
 {"flashkey": {"type": "sse", "url": "http://127.0.0.1:8100/sse"}}
 ```
 
-优点：服务独立，重启 AI 工具不丢失设备状态。**需要 AI 工具支持 SSE 传输。**
-
-### ⚠️ 模式不能混用，也不能同时跑
+### ⚠️ 模式不能混用
 
 - SSE 服务 + stdio config → 工具不可用（config 不匹配）
-- 同时配了 SSE 服务 AND stdio config → 两个 flashkey-mcp 进程抢串口，必有一个报 `device busy`
-- 切换模式时：先停掉旧的（`--service uninstall` 或删 MCP config），再启新的
+- 同时配了 SSE 服务 AND stdio config → 两个 flashkey-mcp 进程抢串口
+- 切换模式时：先停掉旧的，再启新的
 
-### MiMo Code：项目级配置
-
-MiMo Code 在每个项目的根目录用 `mimocode.json` 配置 MCP，格式不同：
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "flashkey-mcp": {
-      "type": "local",
-      "command": ["flashkey-mcp"]
-    }
-  }
-}
-```
-
-关键差异：顶层 key 是 `"mcp"`（不是 `"mcpServers"`）、`"type": "local"`（不是 `"stdio"`）、`"command"` 是数组。
-
-如果文件已存在其他 MCP server，在 `"mcp"` 对象内追加，保留已有条目。
-
-也可以用 CLI：`mimo mcp add flashkey-mcp --command flashkey-mcp`
-
-### 配置文件位置（其他工具）
-
-| 工具 | 配置文件 |
-|------|---------|
-| Claude Code | `~/.claude/.mcp.json` |
-| MiMo Code | 项目根目录 `mimocode.json` — 格式不同，见上方 |
-| Claude Desktop macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop Win | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Cline (VS Code) | `~/.cline/mcp.json` |
-| Hermes Agent | `~/.hermes/config.yaml` |
-
-### 诊断：服务在跑但工具不可用？
+### 诊断命令
 
 ```bash
-flashkey-mcp --service status    # 检查 SSE 服务状态
+flashkey-mcp --service status          # 检查 SSE 服务状态
 journalctl --user -u flashkey-mcp -f   # 查看服务日志
 tail -f /tmp/flashkey-mcp.log          # 查看文件日志
 ```
-
-常见原因：config 格式和运行模式不匹配。例如服务跑 SSE 但 config 写的 `"command"`。修正 config 后 AI 工具应该自动重连。
 
 ---
 
