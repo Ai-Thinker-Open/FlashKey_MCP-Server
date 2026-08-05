@@ -11,9 +11,9 @@ description: FlashKey FK-01 — Ai-WB2 (BL602) 串口打断烧录。flashkey_fla
 
 ## 烧录原理：串口打断模式
 
-BL602 使用**串口打断**方式进入 bootloader：烧录工具 `bflb_iot_tool` 先往 CH340C TX 发送 sync 信号，然后打印 `Please Press Reset Key!` 等待复位。FK-01 检测到提示后通过 RST 引脚复位芯片，BL602 boot ROM 在复位时检测到 sync 信号即进入 bootloader 握手。
+BL602 使用**串口打断**方式进入 bootloader：烧录工具 `bflb_iot_tool` 先往 fk_log 串口（WCH-LinkE VCP）TX 发送 sync 信号，然后打印 `Please Press Reset Key!` 等待复位。FK-01 检测到提示后通过 RST 引脚复位芯片，BL602 boot ROM 在复位时检测到 sync 信号即进入 bootloader 握手。
 
-不需要 BOOT 引脚参与。CH340C 的 DTR/RTS 未引出，复位由 FK-01 RST 引脚完成。
+不需要 BOOT 引脚参与。串口桥 DTR/RTS 不参与复位，复位由 FK-01 RST 引脚完成。
 
 ## 烧录方式一：串口打断（默认，make flash）
 
@@ -81,8 +81,8 @@ Ai-WB2 模组与 FK-01 连接：
 
 | FK-01 | Ai-WB2 |
 |-------|--------|
-| CH340C TX | GPIO7 (RX) |
-| CH340C RX | GPIO16 (TX) |
+| fk_log TX (WCH-LinkE VCP) | GPIO7 (RX) |
+| fk_log RX (WCH-LinkE VCP) | GPIO16 (TX) |
 | RST (PB4) | CHIP_EN |
 | 3V3 | 3.3V |
 | GND | GND |
@@ -91,7 +91,7 @@ Ai-WB2 模组与 FK-01 连接：
 
 ```
 烧录失败
-├─ "shake hand fail" → 检查 CH340C TX/RX 交叉接线
+├─ "shake hand fail" → 检查日志口 TX/RX 交叉接线
 ├─ 串口无输出 → 检查 Ai-WB2 供电（可能需要 5V + 3.3V）
 ├─ 波特率过高 → 降为 115200
 ├─ make flash 多次超时 → 尝试 ISP 模式 (make eflash, mode="isp")

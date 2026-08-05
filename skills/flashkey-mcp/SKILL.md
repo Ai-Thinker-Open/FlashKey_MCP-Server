@@ -39,7 +39,7 @@ FlashKey FK-01 是双芯片设备，插上后系统会出现**两个**串口。*
 | role | VID/PID | 用途 |
 |------|---------|------|
 | `fk_control` | 1A86:FE0D | **FK-01 主控** — 仅 MCP 内部使用 |
-| `fk_flash` | 1A86:7523 | **CH340C 烧录口** — `flashkey_flash()` 和 `flashkey_log()` 用这个 |
+| `fk_log` | 1A86:8010 | **WCH-LinkE VCP 日志/烧录口**（最高 921600）— `flashkey_flash()` / `flashkey_log()` / `flashkey_send()` 用这个 |
 | `unknown` | 其他 | 非 FlashKey 设备，忽略 |
 
 不同系统上设备名不同（Linux: `/dev/ttyACMx` `/dev/ttyUSBx`，Windows: `COMx`，macOS: `/dev/cu.*`），所以**不要猜名字，看 `role` 字段**。
@@ -180,7 +180,7 @@ tail -f /tmp/flashkey-mcp.log          # 查看文件日志
 ### 3b. 烧录
 
 ```
-flashkey_flash(firmware_path="/path/to/firmware.bin", flash_port="fk_flash端口", chip="bl616")
+flashkey_flash(firmware_path="/path/to/firmware.bin", flash_port="fk_log端口", chip="bl616")
 ```
 
 ### 3c. 查看日志
@@ -190,6 +190,23 @@ flashkey_log(port="同上端口", duration=5, grep="Hello World")
 ```
 
 如果不启动：`flashkey_rst_pulse(50)` + `flashkey_log()`。
+
+### 3d. 发送串口数据
+
+```
+flashkey_send(port="fk_log端口", data="AT\r\n", read_response=True)
+```
+
+- **encoding="text"** (默认): 字符串作为 UTF-8 发送，`\n` `\r` `\t` 转义可用
+- **encoding="hex"**: 十六进制发送，如 `"48 65 6C 6C 6F"` 或 `"48656C6C6F"`
+- **read_response=True**: 发送后读回目标响应（适合 AT 指令等一问一答协议）
+- **read_response=False**: 仅发送，不等待响应
+
+示例：
+```
+flashkey_send(port="/dev/ttyUSB0", data="AT+UART_CUR=115200,8,1,0,0\r\n", read_response=True)
+flashkey_send(port="/dev/ttyUSB0", data="48656C6C6F0D0A", encoding="hex")
+```
 
 ---
 
@@ -221,7 +238,7 @@ flashkey_flash() 失败
 ├─ flashkey_status() 先检查 authed / boot / rst 状态
 ├─ authed: false → 拔出 FK-01 重新插入，等 5 秒
 ├─ "make: No rule" → sdk_path 不对
-├─ CH340C 被占用 → 关闭串口监视器
+├─ fk_log 被占用 → 关闭串口监视器
 ├─ 烧录成功但不启动 → flashkey_rst_pulse(50) + flashkey_log(port, duration=5)
 └─ 芯片特定问题 → 加载对应芯片子 skill
 ```
@@ -229,9 +246,10 @@ flashkey_flash() 失败
 ## 平台陷阱
 
 - **Windows COM10+**：必须写 `\\.\COM10`
-- **WSL**：FK-01 + CH340C 需要 `usbipd` 映射
-- **串口互斥**：`flashkey_log` 和 `flashkey_flash` 共用 CH340C
+- **WSL**：FK-01 + WCH-Link 需要 `usbipd` 映射
+- **串口互斥**：`flashkey_log`、`flashkey_send` 和 `flashkey_flash` 共用 fk_log
 - **v5v 反直觉**：`v5v_set(True)` = PB1 LOW = 开启 5V
+- **vusb 反直觉**：`vusb_set(True)` = PA0 LOW = 开启外置 USB-A 电源（拉低启动，拉高关闭）
 
 ## 引脚参考
 
@@ -241,3 +259,4 @@ flashkey_flash() 失败
 | RST | PB4 | `rst_set()`/`rst_pulse()` |
 | 5V_EN | PB1 | `v5v_set()` — 低有效 |
 | 3V3_EN | PB0 | `v3v3_set()` — 高有效 |
+| USB-A 电源 | PA0 | `vusb_set()` — 低有效（拉低=开，拉高=关） |
