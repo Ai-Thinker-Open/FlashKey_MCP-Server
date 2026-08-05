@@ -102,7 +102,7 @@ flashkey_status()
 
 ## 工作原理
 
-FlashKey FK-01 是双芯片 USB 烧录调试器。MCP 插件提供 19 个工具：
+FlashKey FK-01 是双芯片 USB 烧录调试器。MCP 插件提供 21 个工具：
 
 ```
 flashkey_status()          ← 统一状态，无需认证
@@ -110,6 +110,8 @@ flashkey_list_ports()      ← 列出所有串口
 
 flashkey_flash()           ← 一键烧录 BL602/BL616/BL618
 flashkey_log()             ← 采集目标芯片日志
+flashkey_firmware_check()  ← 检查 FK-01 自身固件是否有更新
+flashkey_firmware_flash()  ← 烧录 FK-01 自身 CH32V203 固件（OpenOCD + WCH-LinkE）
 
 flashkey_boot_set/get()    ← BOOT 引脚控制
 flashkey_rst_set/get/pulse()  ← RST 引脚控制
@@ -120,6 +122,24 @@ flashkey_ping() / flashkey_get_version() / flashkey_get_uid()
 ```
 
 插入 FK-01 后自动握手，5 秒内完成。
+
+---
+
+## FK-01 自身固件升级（CH32V203）
+
+`flashkey_firmware_check()` 比较设备当前固件版本、当前安装包内置固件版本与
+GitHub 最新 Release 固件版本；`flashkey_firmware_flash()` 通过 WCH-LinkE（SDI）
+烧录 CH32V203（默认烧包内内置 hex，也可传 `hex_path`）。
+
+⚠️ 烧录前置条件：把 FlashKey 自带的 WCH-LinkE 通过 USB 接入电脑，并将
+SWDIO/SWCLK/GND/3V3 接到 CH32V203 的 SWD 接口且目标板上电；WSL 环境需先
+`usbip attach`。烧录需要显式传 `confirm=True`；普通烧录失败且疑似读保护/
+写保护时，工具会自动用带 unlock 的全片擦除+烧录重试一次，仍失败会提示用
+Windows 主机的 **WCH-LinkUtility** 手动解锁。
+
+OpenOCD 二进制（WCH v1.6，Linux x64 / Windows x64）已随包内置在
+`flashkey_mcp/openocd/`，无需单独安装；可用环境变量 `FLASHKEY_OPENOCD`
+覆盖路径。随附组件的许可证见包内 `NOTICE-OPENOCD.md`。
 
 ---
 

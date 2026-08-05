@@ -1,6 +1,6 @@
 ---
 name: flashkey-mcp
-description: FlashKey FK-01 MCP 插件 — BL602/BL616/BL618 烧录调试。AI 检测安装状态，引导安装+配置+重启，一句话完成烧录和日志采集。
+description: FlashKey FK-01 MCP 插件 — BL602/BL616/BL618 烧录调试 + FK-01 自身 CH32V203 固件升级。AI 检测安装状态，引导安装+配置+重启，一句话完成烧录和日志采集。
 ---
 
 # FlashKey FK-01 — AI 操作知识库
@@ -217,6 +217,51 @@ flashkey_send(port="/dev/ttyUSB0", data="48656C6C6F0D0A", encoding="hex")
 **调用 `flashkey_flash()` 一键烧录**，FK-01 自动处理时序和恢复。
 
 **烧录后**：`flashkey_log(port, duration=5)` 验证启动日志。
+
+---
+
+## 步骤 4：FK-01 自身固件升级（CH32V203）
+
+FK-01 主控芯片是 CH32V203。升级其固件需要 **WCH-LinkE 调试器**，且
+**无法全自动完成**——必须先由用户完成硬件接线，之后才能触发烧录。
+
+### 4a. 先检查更新
+
+调用 `flashkey_firmware_check()`（无需认证）：
+
+- `update_available: true` → 有比设备当前更新的固件，进入 4b
+- `package_update_available: true` → 需要先升级 flashkey-mcp 包才能拿到新 hex
+  （`pip install --upgrade git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git`，重启服务）
+- `latest_*` 为 null → GitHub 暂无 Release 或网络不可达，按现状使用包内固件
+
+### 4b. 硬件准备（必须用户手动完成）
+
+1. 把 FlashKey 自带的 WCH-LinkE 通过 USB 接入电脑
+   （WSL 环境：`usbip attach` 到 WSL）
+2. 将 WCH-LinkE 的 **SWDIO / SWCLK / GND / 3V3** 接到 CH32V203 的 **SWD 接口**
+3. 确认目标板上电
+
+未接线时工具会返回硬件准备错误并说明以上步骤，不会执行烧录。
+
+### 4c. 触发烧录
+
+```python
+flashkey_firmware_flash(confirm=True)
+```
+
+- `hex_path`：默认烧包内内置 hex；可传自定义路径
+- `force=True`：允许烧录比设备当前更低的版本
+- `dry_run=True`：只打印将执行的命令，不实际烧录
+- 普通烧录失败且疑似读保护/写保护时，工具会**自动用带 unlock 的全片擦除+烧录重试一次**
+
+### 4d. 仍失败：WCH-LinkUtility 解锁（兜底）
+
+自动解锁重试仍失败时，工具会返回指引：在 **Windows 主机**上运行
+**WCH-LinkUtility** → 连接 WCH-LinkE → 选择 **Unlock** 解除保护 →
+重新执行 `flashkey_firmware_flash(confirm=True)`。
+
+> OpenOCD（WCH v1.6，Linux x64 / Windows x64）已随 flashkey-mcp 包内置，
+> 无需单独安装；可用环境变量 `FLASHKEY_OPENOCD` 覆盖。
 
 ---
 
