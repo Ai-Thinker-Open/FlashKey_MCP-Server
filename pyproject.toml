@@ -31,4 +31,13 @@ where = ["src"]
 flashkey-mcp = "flashkey_mcp.server:main"
 
 [tool.setuptools.package-data]
-flashkey_mcp = ["py.typed"]
+flashkey_mcp = [
+    "py.typed",
+    "firmware/*.hex",
+    "firmware/*.json",
+    "openocd/*.cfg",
+    "openocd/*.txt",
+    "openocd/*.md",
+    "openocd/bin/linux-x64/*",
+    "openocd/bin/win-x64/*",
+]

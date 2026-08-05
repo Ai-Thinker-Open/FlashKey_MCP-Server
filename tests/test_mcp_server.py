@@ -52,6 +52,8 @@ EXPECTED_TOOLS = [
     "flashkey_flash",
     "flashkey_log",
     "flashkey_send",
+    "flashkey_firmware_check",
+    "flashkey_firmware_flash",
 ]
 
 _FAILURES: list[str] = []

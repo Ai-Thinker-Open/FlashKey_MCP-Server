@@ -28,6 +28,7 @@ from typing import Any
 from flashkey_mcp.transport import list_all_ports, FLASHKEY_VID, FLASHKEY_PID
 from flashkey_mcp.device_manager import DeviceManager
 from flashkey_mcp.modules import ModuleRegistry, module_timeout_ms
+from flashkey_mcp import firmware_tools
 
 logger = logging.getLogger(__name__)
 
@@ -1132,6 +1133,85 @@ mcp.add_tool(
         "返回: sent(发送字节数)、data(数据摘要)；若 read_response=True，还包含 response(响应文本)、response_lines(行数)\n"
         "与 flashkey_flash 互斥，串口忙时返回 isError。\n"
         "示例: flashkey_send(port=\"/dev/ttyUSB0\", data=\"AT\\r\\n\", read_response=True) 发送 AT 指令并读取响应"
+    ),
+)
+
+
+# ── flashkey_firmware_check / flashkey_firmware_flash (CH32V203 self-update) ──
+
+def _read_device_version() -> str | None:
+    """Best-effort current FK-01 firmware version; None when offline."""
+    try:
+        _, fk = _require_fk()
+        return fk.commands.get_version().get("version")
+    except Exception:
+        return None
+
+
+def _tool_firmware_check() -> dict:
+    """Check whether a newer FK-01 firmware / flashkey-mcp release exists."""
+    return firmware_tools.check_firmware_update(device_version=_read_device_version())
+
+
+def _tool_firmware_flash(
+    hex_path: str = "",
+    confirm: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+    timeout: int = firmware_tools.DEFAULT_FLASH_TIMEOUT_S,
+) -> dict:
+    """Flash the FK-01 CH32V203 firmware via WCH-LinkE (SDI)."""
+    global _flash_active_port
+    if not _flash_lock.acquire(blocking=False):
+        raise ToolError("烧录/日志会话进行中，请等待当前操作完成后再试")
+    _flash_active_port = "<fk203-swd>"
+    try:
+        return firmware_tools.flash_ch32v203(
+            hex_path=hex_path,
+            confirm=confirm,
+            force=force,
+            dry_run=dry_run,
+            timeout=timeout,
+            get_version_fn=_read_device_version,
+        )
+    finally:
+        _flash_active_port = ""
+        _flash_lock.release()
+
+
+mcp.add_tool(
+    _tool_wrapper(_tool_firmware_check, require_auth=False),
+    name="flashkey_firmware_check",
+    description=(
+        "检查 FK-01 CH32V203 固件是否有更新（无需认证）。\n"
+        "返回: device_version(设备当前固件版本，离线为 null)、"
+        "installed_mcp_version(已安装 flashkey-mcp 版本)、"
+        "latest_mcp_version(最新发布版本)、"
+        "bundled_hex_version(当前安装包内置固件版本)、"
+        "latest_hex_version(最新发布固件版本)、"
+        "update_available(是否有新固件可烧)、"
+        "package_update_available(是否需要先升级 flashkey-mcp 包以获取新 hex)、"
+        "changelog(更新日志)、release_url(Release 链接)。\n"
+        "若 GitHub 不可访问或尚无 Release，latest_* 为 null。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_firmware_flash),
+    name="flashkey_firmware_flash",
+    description=(
+        "烧录 FK-01 自身 CH32V203 固件（OpenOCD + WCH-LinkE SDI，需要认证）。\n"
+        "⚠️ 前置条件：把 FlashKey 自带的 WCH-LinkE 通过 USB 接入电脑，"
+        "并将 SWDIO/SWCLK/GND/3V3 接到 CH32V203 的 SWD 接口且目标板上电；"
+        "WSL 环境需先把调试器 usbip attach 到 WSL。\n"
+        "参数: hex_path(固件路径，默认使用包内内置固件)、"
+        "confirm(必须显式传 True 才会执行)、"
+        "force(允许烧录比设备当前更低的版本)、"
+        "dry_run(只打印将执行的命令，不实际烧录)、"
+        "timeout(OpenOCD 超时秒数，默认 90)。\n"
+        "普通烧录失败且疑似读保护/写保护时，会自动用带 unlock 的全片擦除+烧录重试一次；"
+        "仍失败则返回 WCH-LinkUtility 手动解锁指引。\n"
+        "返回: ok、before_version、after_version、unlocked_retried、"
+        "output_summary、duration_s；dry_run 时含 commands。"
     ),
 )
 
