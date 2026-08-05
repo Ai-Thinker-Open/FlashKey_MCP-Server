@@ -27,6 +27,9 @@ sys.path.insert(0, SRC_DIR)
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 
 EXPECTED_TOOLS = [
+    "flashkey_status",
+    "flashkey_list_ports",
+    "flashkey_module_info",
     "flashkey_ping",
     "flashkey_auth_status",
     "flashkey_boot_set",
@@ -38,10 +41,17 @@ EXPECTED_TOOLS = [
     "flashkey_v5v_get",
     "flashkey_v3v3_set",
     "flashkey_v3v3_get",
+    "flashkey_vusb_set",
+    "flashkey_vusb_get",
+    "flashkey_flash_monitor",
     "flashkey_get_version",
     "flashkey_get_uid",
+    "flashkey_get_events",
     "flashkey_get_status",
     "flashkey_enter_bootloader",
+    "flashkey_flash",
+    "flashkey_log",
+    "flashkey_send",
 ]
 
 _FAILURES: list[str] = []
@@ -249,7 +259,7 @@ def test_jsonrpc_initialize() -> None:
 # ── Test 3: tools/list ──────────────────────────────────────────────────
 
 def test_tools_list() -> None:
-    """After initialize, tools/list must return exactly 15 tools."""
+    """After initialize, tools/list must return all expected tools."""
     proc = start_server()
     try:
         initialize_server(proc)
@@ -263,7 +273,9 @@ def test_tools_list() -> None:
         tools = r["tools"]
 
         assert isinstance(tools, list), f"tools is not a list: {type(tools)}"
-        assert len(tools) == 15, f"Expected 15 tools, got {len(tools)}"
+        assert len(tools) == len(EXPECTED_TOOLS), (
+            f"Expected {len(EXPECTED_TOOLS)} tools, got {len(tools)}"
+        )
 
         # Verify each tool has name and description
         for t in tools:
@@ -351,8 +363,12 @@ def test_auth_middleware_no_hardware() -> None:
         # At least one text content should mention no device or not authed
         texts = [c["text"] for c in content if c.get("type") == "text"]
         combined = " ".join(texts)
-        assert "No FlashKey device" in combined or "Not authenticated" in combined, (
-            f"Expected 'No FlashKey device' or 'Not authenticated' in tool response, "
+        assert (
+            "No FlashKey device" in combined
+            or "Not authenticated" in combined
+            or "未检测到" in combined
+        ), (
+            f"Expected a no-device / not-authenticated error in tool response, "
             f"got: {combined}"
         )
         print(f"  test_auth_middleware_no_hardware ✅  msg={combined!r}")

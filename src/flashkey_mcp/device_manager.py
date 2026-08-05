@@ -32,7 +32,9 @@ from enum import Enum, auto
 
 from flashkey_mcp import FlashKey, find_port
 from flashkey_mcp.protocol import FrameParser
-from flashkey_mcp.commands import CMD_HELLO
+from flashkey_mcp.commands import CMD_EVT_BUTTON, CMD_EVT_MODULE_DATA, CMD_HELLO
+from flashkey_mcp.events import EventRecorder
+from flashkey_mcp.modules import ModuleRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,9 @@ _PING_MAX_FAILS: int = 10
 
 # Poll interval in seconds when inotify is unavailable (Windows / fallback)
 _FALLBACK_POLL_INTERVAL: float = 1.0
+
+# Extension-module manifest poll interval while AUTHED
+_MODULE_POLL_INTERVAL: float = 10.0
 
 # ---------------------------------------------------------------------------
 # Error messages (需求 2.5)
@@ -104,6 +109,8 @@ class DeviceManager:
         self._stop_event = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._pause_keepalive: bool = False  # suppress PING during flash ops
+        self._recorder = EventRecorder()
+        self._module_registry: ModuleRegistry | None = None
 
         # -- inotify (Linux) --
         self._inotify_fd: int = -1
@@ -203,19 +210,36 @@ class DeviceManager:
         Returns::
 
             {"authed": bool, "version": str, "boot": 0|1, "rst": 0|1,
-             "v5v": 0|1, "v3v3": 0|1}
+             "v5v": 0|1, "v3v3": 0|1, "vusb": 0|1,
+             "module": {"present": bool, "type": str|None, "fw": str|None}}
         """
+        module = self.get_module_info()
+        module_field = {
+            "present": bool(module.get("present")),
+            "type": None,
+            "fw": None,
+        }
+        if module.get("module"):
+            module_field["type"] = module["module"].get("name")
+            module_field["fw"] = (
+                module["module"].get("version")
+                or module["module"].get("fw")
+                or module["module"].get("firmware")
+            )
+
         if not self.authed:
             return {
                 "authed": False, "version": "", "boot": 0,
-                "rst": 0, "v5v": 0, "v3v3": 0,
+                "rst": 0, "v5v": 0, "v3v3": 0, "vusb": 0,
+                "module": module_field,
             }
 
         fk = self._fk
         if fk is None:
             return {
                 "authed": False, "version": "", "boot": 0,
-                "rst": 0, "v5v": 0, "v3v3": 0,
+                "rst": 0, "v5v": 0, "v3v3": 0, "vusb": 0,
+                "module": module_field,
             }
 
         try:
@@ -228,13 +252,55 @@ class DeviceManager:
                 "rst": pin_status.get("rst", 0),
                 "v5v": pin_status.get("v5v", 0),
                 "v3v3": pin_status.get("v3v3", 0),
+                "vusb": pin_status.get("vusb", 0),
+                "module": module_field,
             }
         except Exception as exc:
             logger.warning("get_status failed: %s", exc)
             return {
                 "authed": False, "version": "", "boot": 0,
-                "rst": 0, "v5v": 0, "v3v3": 0,
+                "rst": 0, "v5v": 0, "v3v3": 0, "vusb": 0,
+                "module": module_field,
             }
+
+    def get_recent_events(self, limit: int = 20) -> list[dict]:
+        """Return recently recorded device events (newest first)."""
+        return self._recorder.recent(limit)
+
+    def set_module_registry(self, registry: ModuleRegistry) -> None:
+        """Attach the dynamic-tool module registry (wired by the server)."""
+        self._module_registry = registry
+
+    def get_module_info(self) -> dict:
+        """Return cached module info from the registry (no IO)."""
+        if self._module_registry is None:
+            return {"present": False, "module": None, "tools": [], "last_error": ""}
+        return self._module_registry.info()
+
+    def _drain_events(self) -> None:
+        """Consume queued device→host event frames and record them."""
+        fk = self._fk
+        if fk is None:
+            return
+        while True:
+            try:
+                cmd, data = fk.transport.event_queue.get_nowait()
+            except Exception:
+                break
+            try:
+                if cmd == CMD_EVT_BUTTON:
+                    self._recorder.record_button_event(data)
+                elif cmd == CMD_EVT_MODULE_DATA:
+                    if self._module_registry is not None:
+                        self._module_registry.on_module_data(data)
+                    else:
+                        logger.debug("Module data ignored (no registry): %s", data.hex())
+                else:
+                    logger.debug(
+                        "Ignored unsolicited frame 0x%02X: %s", cmd, data.hex()
+                    )
+            except Exception as exc:
+                logger.warning("Event handling failed: %s", exc)
 
     # ==================================================================
     # Background monitor loop
@@ -347,6 +413,8 @@ class DeviceManager:
                     self._state = DeviceState.AUTHED
                     self._last_error = ""
                 logger.info("Handshake succeeded — device authenticated")
+                # 处理握手期间到达的缓存事件（固件认证完成后补传按键事件）
+                self._drain_events()
                 return
         except Exception as exc:
             logger.warning("Handshake error: %s", exc)
@@ -362,6 +430,7 @@ class DeviceManager:
     def _ping_keepalive(self) -> None:
         """Send PING every 2 s.  After _PING_MAX_FAILS consecutive failures, disconnect."""
         fail_count = 0
+        last_module_poll = 0.0
         while not self._stop_event.is_set():
             fk = self._fk
             with self._lock:
@@ -369,6 +438,16 @@ class DeviceManager:
 
             if state is not DeviceState.AUTHED or fk is None:
                 return  # state changed externally
+
+            self._drain_events()
+
+            # 扩展模块清单轮询（10s 一次，仅 AUTHED 时）
+            if (
+                self._module_registry is not None
+                and time.monotonic() - last_module_poll >= _MODULE_POLL_INTERVAL
+            ):
+                last_module_poll = time.monotonic()
+                self._poll_module()
 
             try:
                 fk.commands.ping(read_timeout=1.0)
@@ -385,6 +464,21 @@ class DeviceManager:
                     return
 
             self._sleep_or_watch(_PING_INTERVAL)
+
+    def _poll_module(self) -> None:
+        """Query the module manifest and sync dynamic tools."""
+        fk = self._fk
+        registry = self._module_registry
+        if fk is None or registry is None:
+            return
+        try:
+            raw = fk.commands.module_get_info(read_timeout=2.0)
+            registry.update(raw)
+        except TimeoutError:
+            # 固件无模块支持或总线忙：保留上一份状态，避免误删工具
+            logger.debug("Module manifest poll timed out — keeping previous state")
+        except Exception as exc:
+            logger.warning("Module manifest poll failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Helpers

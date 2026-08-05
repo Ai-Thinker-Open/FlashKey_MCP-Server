@@ -1,6 +1,7 @@
 """Test commands.py: public API and frame format verification (no hardware)."""
 from __future__ import annotations
 
+import threading
 import sys
 import os
 
@@ -14,6 +15,7 @@ class MockTransport:
     """Simulates a FlashKeyTransport for testing command frame format."""
 
     def __init__(self):
+        self._lock = threading.RLock()
         self._sent_frames: list[bytes] = []
         self._response_data: bytes = b""
 
@@ -198,6 +200,25 @@ def test_v3v3_get():
     print("  V3V3_GET ✅")
 
 
+def test_vusb_set():
+    t = MockTransport()
+    cmd = FlashKeyCommands(t)
+    cmd.vusb_set(True)
+    rsp_cmd, rsp_data = parse_sent_frame(t.last_frame)
+    assert rsp_cmd == 0x36
+    assert rsp_data == b"\x01"
+    print("  VUSB_SET ✅")
+
+
+def test_vusb_get():
+    t = MockTransport()
+    cmd = FlashKeyCommands(t)
+    t.inject_response(0x38, b"\x01")
+    result = cmd.vusb_get()
+    assert result is True
+    print("  VUSB_GET ✅")
+
+
 def test_get_version():
     t = MockTransport()
     cmd = FlashKeyCommands(t)
@@ -219,29 +240,29 @@ def test_get_uid():
 def test_get_status():
     t = MockTransport()
     cmd = FlashKeyCommands(t)
-    # status[3] = [boot=1, rst=0, bitfield: boot|v5v|v3v3 = 0b1101 = 0x0D]
+    # status = [boot=1, rst=0, bitfield: boot|v5v|v3v3 = 0b1101 = 0x0D, vusb=0]
     t.inject_response(0x45, bytes([0x01, 0x00, 0x0D]))
-    # Need a second response for auth_status call inside get_status
-    t.inject_response(0x13, b"\x01")
     result = cmd.get_status()
-    assert result == {"boot": 1, "rst": 0, "v5v": 1, "v3v3": 1, "authed": 1}, f"Got {result}"
+    assert result == {"boot": 1, "rst": 0, "v5v": 1, "v3v3": 1, "vusb": 0}, f"Got {result}"
     print("  GET_STATUS ✅")
 
 
 def test_15_methods_available():
-    """Verify all 15 expected method names exist."""
+    """Verify all expected method names exist."""
     expected = {
         "ping", "handshake", "auth_status",
         "boot_set", "boot_get", "rst_set", "rst_get", "rst_pulse",
         "v5v_set", "v5v_get", "v3v3_set", "v3v3_get",
+        "vusb_set", "vusb_get",
         "get_version", "get_uid", "get_status",
+        "module_get_info", "module_io", "module_ioctl",
     }
     actual = {m for m in dir(FlashKeyCommands) if not m.startswith("_")}
     missing = expected - actual
     extra = actual - expected
     assert not missing, f"Missing methods: {missing}"
-    assert not extra - {"get_status"}, f"Unexpected methods: {extra}"
-    print(f"  All 15 methods present (got {len(actual)}) ✅")
+    assert not extra, f"Unexpected methods: {extra}"
+    print(f"  All {len(expected)} methods present ✅")
 
 
 if __name__ == "__main__":
@@ -260,6 +281,8 @@ if __name__ == "__main__":
     test_v5v_get()
     test_v3v3_set()
     test_v3v3_get()
+    test_vusb_set()
+    test_vusb_get()
     test_get_version()
     test_get_uid()
     test_get_status()

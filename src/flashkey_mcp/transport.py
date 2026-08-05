@@ -1,6 +1,7 @@
 """USB CDC serial port discovery and communication for FlashKey FK-01."""
 
 import glob
+import queue
 import os
 import time
 
@@ -11,8 +12,8 @@ import serial.tools.list_ports
 FLASHKEY_VID = 0x1A86
 FLASHKEY_PID = 0xFE0D  # FK-01 main controller (MCP control port)
 
-CH340C_VID = 0x1A86
-CH340C_PID = 0x7523  # CH340C USB-UART bridge on FK-01 (flash/log port)
+WCHLINK_VID = 0x1A86
+WCHLINK_PID = 0x8010  # WCH-LinkE VCP — FK-01 v0.1.1 log/flash port
 
 
 def _classify_port(vid: int, pid: int) -> str:
@@ -20,14 +21,14 @@ def _classify_port(vid: int, pid: int) -> str:
 
     Returns:
         ``"fk_control"`` — FK-01 main controller (for MCP, NOT for flashing).
-        ``"fk_flash"``   — CH340C bridge on FK-01 (for flash_key_flash / flashkey_log).
+        ``"fk_log"``     — WCH-LinkE VCP on FK-01 v0.1.1 (log/flash port, max 921600).
         ``"unknown"``    — not a FlashKey device.
     """
     if vid == FLASHKEY_VID:
         if pid == FLASHKEY_PID:
             return "fk_control"
-        if pid == CH340C_PID:
-            return "fk_flash"
+        if pid == WCHLINK_PID:
+            return "fk_log"
     return "unknown"
 
 
@@ -36,8 +37,8 @@ def list_all_ports() -> "list[dict]":
 
     Returns:
         A list of dicts with keys ``port``, ``description``, ``vid``, ``pid``,
-        and ``role`` — one of ``"fk_control"`` (MCP only), ``"fk_flash"``
-        (for flashing/logging), or ``"unknown"``.
+        and ``role`` — one of ``"fk_control"`` (MCP only),
+        ``"fk_log"`` (WCH-LinkE VCP, v0.1.1), or ``"unknown"``.
     """
     result: list[dict] = []
     for p in serial.tools.list_ports.comports():
@@ -127,6 +128,7 @@ class FlashKeyTransport:
         _require_mcp_runtime()
         import threading
         self._lock = threading.RLock()
+        self.event_queue: queue.Queue = queue.Queue()
         self._ser = serial.Serial(
             port=port,
             baudrate=115200,
@@ -138,6 +140,14 @@ class FlashKeyTransport:
         """Write raw bytes to the serial port."""
         with self._lock:
             self._ser.write(data)
+
+    def enqueue_event(self, cmd: int, data: bytes) -> None:
+        """Queue an unsolicited device→host frame for the event dispatcher.
+
+        Called by the command layer when a received frame does not match the
+        expected response command (e.g. manual button-event notifications).
+        """
+        self.event_queue.put((cmd, data))
 
     def read(self, n: int = 1) -> bytes:
         """Read up to *n* bytes from the serial port."""

@@ -27,6 +27,7 @@ from typing import Any
 
 from flashkey_mcp.transport import list_all_ports, FLASHKEY_VID, FLASHKEY_PID
 from flashkey_mcp.device_manager import DeviceManager
+from flashkey_mcp.modules import ModuleRegistry, module_timeout_ms
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ def _validate_flash_port(port: str) -> None:
 
     FK-01 has two ports identified by VID/PID, not device name:
       - ``fk_control`` (VID=1A86, PID=FE0D) → FK-01 main controller, MCP only.
-      - ``fk_flash``   (VID=1A86, PID=7523) → CH340C bridge, flash/log use this.
+      - ``fk_log``     (VID=1A86, PID=8010) → WCH-LinkE VCP on v0.1.1, log/flash use this.
 
     Always use ``flashkey_list_ports()`` and match by ``role`` field.
     """
@@ -49,11 +50,11 @@ def _validate_flash_port(port: str) -> None:
                 # Find the correct flash port to suggest
                 flash_ports = [
                     pp.device for pp in _list_ports.comports()
-                    if pp.vid == 0x1A86 and pp.pid == 0x7523
+                    if pp.vid == 0x1A86 and pp.pid == 0x8010
                 ]
                 hint = ""
                 if flash_ports:
-                    hint = f" 请改用 role=fk_flash 的烧录端口: {', '.join(flash_ports)}"
+                    hint = f" 请改用日志/烧录端口: {', '.join(flash_ports)}"
                 raise ToolError(
                     f"{port} 是 FK-01 主控端口 (role=fk_control, MCP 内部专用)，"
                     f"不能用于烧录或日志。{hint}"
@@ -63,6 +64,7 @@ def _validate_flash_port(port: str) -> None:
 
 # ── Singleton device manager ─────────────────────────────────────────
 _dm: DeviceManager | None = None
+_module_registry = ModuleRegistry()
 # Flash/log mutual exclusion lock (per serial port)
 _flash_lock = threading.Lock()
 _flash_active_port: str = ""
@@ -77,6 +79,9 @@ def _get_dm() -> DeviceManager:
     global _dm
     if _dm is None:
         _dm = DeviceManager()
+        _module_registry.attach(mcp)
+        _dm.set_module_registry(_module_registry)
+        _module_registry.set_io_handler(_module_io_forward)
         _dm.start()
         logger.info("DeviceManager started (state: %s)", _dm.state.name)
     return _dm
@@ -111,6 +116,17 @@ def _require_fk():
     if fk is None:
         raise ToolError("设备未连接，请插入 FlashKey FK-01")
     return dm, fk
+
+
+def _module_io_forward(payload: bytes) -> dict:
+    """Forward serialized tool args to the module and collect the 0x63 window."""
+    _, fk = _require_fk()
+    return fk.commands.module_io(payload, window_ms=module_timeout_ms())
+
+
+def _tool_module_info() -> dict:
+    """Query extension-module presence, manifest and registered mod_* tools."""
+    return _get_dm().get_module_info()
 
 
 # ======================================================================
@@ -188,6 +204,17 @@ def _tool_v5v_get() -> dict:
     return {"value": fk.commands.v5v_get()}
 
 
+def _tool_vusb_set(value: bool) -> dict:
+    _, fk = _require_fk()
+    fk.commands.vusb_set(value)
+    return {"result": "ok"}
+
+
+def _tool_vusb_get() -> dict:
+    _, fk = _require_fk()
+    return {"value": fk.commands.vusb_get()}
+
+
 def _tool_v3v3_set(value: bool) -> dict:
     _, fk = _require_fk()
     fk.commands.v3v3_set(value)
@@ -207,6 +234,15 @@ def _tool_get_version() -> dict:
 def _tool_get_uid() -> dict:
     _, fk = _require_fk()
     return {"uid": fk.commands.get_uid()}
+
+# ── flashkey_get_events (v0.1.1) ─────────────────────────────────────
+
+def _tool_get_events(limit: int = 20) -> dict:
+    """Return recorded device events (e.g. manual PB8/PB9 button operations)."""
+    dm = _get_dm()
+    count = max(1, min(int(limit), 100))
+    events = dm.get_recent_events(count)
+    return {"count": len(events), "events": events}
 
 
 # ── flashkey_get_status (DEPRECATED — use flashkey_status) ──────────
@@ -262,7 +298,7 @@ def _flash_break_mode(
 ) -> tuple[bool, list[str]]:
     """BL602 serial break mode: run flash tool → detect prompt → RST pulse.
 
-    The flash tool (bflb_iot_tool) sends a sync pattern on CH340C TX, then
+    The flash tool (bflb_iot_tool) sends a sync pattern on the flash port TX, then
     prints "Please Press Reset Key!" and waits.  FK-01 pulses its RST pin
     to reset the BL602 — the boot ROM detects the sync pattern at reset and
     enters bootloader.  No BOOT pin manipulation needed.
@@ -279,8 +315,8 @@ def _flash_break_mode(
     """
     import threading as _threading
 
-    # Ensure FK-01 GPIOs don't conflict with CH340C DTR/RTS control.
-    # BOOT low = default, CH340C handles reset signalling via RTS.
+    # Ensure FK-01 GPIOs don't conflict with the flash port DTR/RTS control.
+    # BOOT low = default, the serial bridge handles reset signalling via RTS.
     fk.commands.boot_set(False)
 
     proc = None
@@ -405,7 +441,7 @@ def _tool_flash(
     if mode not in ("break", "isp"):
         raise ToolError(f"不支持的烧录模式: {mode}。可选: break, isp")
 
-    # Reject FK-01 control port — must use CH340C flash port
+    # Reject FK-01 control port — must use fk_log (WCH-LinkE VCP)
     _validate_flash_port(flash_port)
 
     fw_path = Path(firmware_path).expanduser().resolve()
@@ -635,7 +671,7 @@ def _tool_log(
 ) -> dict:
     """Capture serial log output from the target chip.
 
-    Opens *port* (the same CH340C / USB-UART bridge used for flashing),
+    Opens *port* (the WCH-LinkE VCP used for flashing/logging),
     reads for *duration* seconds, optionally filters with *grep*, and
     truncates to *max_lines* lines.
     """
@@ -698,6 +734,123 @@ def _tool_log(
 
 
 # ======================================================================
+# flashkey_send (NEW) — 串口数据发送
+# ======================================================================
+
+
+def _tool_send(
+    port: str,
+    data: str,
+    baud_rate: int = 115200,
+    encoding: str = "text",
+    read_response: bool = False,
+    read_timeout: float = 1.0,
+) -> dict:
+    """Send serial data to the target chip through the WCH-LinkE VCP UART bridge.
+
+    Opens *port* (the WCH-LinkE VCP used for flashing/logging),
+    sends *data*, optionally reads back a response, and closes the port.
+
+    Encoding modes:
+    - ``"text"`` (default): send the string as UTF-8 bytes. Supports
+      escape sequences like ``\\n``, ``\\r``, ``\\t``, ``\\\\``.
+    - ``"hex"``: parse *data* as a hex string (spaces optional),
+      e.g. ``"48 65 6C 6C 6F"`` or ``"48656C6C6F"``.
+
+    Args:
+        port: The serial port (role=fk_log, the WCH-LinkE VCP; NOT fk_control).
+        data: The data payload to send.
+        baud_rate: Serial baud rate (default 115200).
+        encoding: ``"text"`` (default) or ``"hex"``.
+        read_response: If True, read back data from the target for
+              up to *read_timeout* seconds after sending.
+        read_timeout: Max seconds to wait for a response (default 1.0, max 10.0).
+    """
+    import serial as pyserial
+
+    # Reject FK-01 control port
+    _validate_flash_port(port)
+
+    # Mutual exclusion with flashkey_flash on the same port
+    if _flash_lock.locked() and _flash_active_port == port:
+        raise ToolError("烧录进行中，串口正忙，请等待烧录完成")
+
+    # Decode data based on encoding
+    if encoding == "text":
+        # unicode_escape interprets literal \n \r \t \\ etc. as control chars,
+        # while leaving already-decoded control chars from JSON unchanged.
+        raw = data.encode("utf-8").decode("unicode_escape").encode("latin-1")
+    elif encoding == "hex":
+        hex_str = data.replace(" ", "").replace("\n", "").replace("\t", "")
+        if len(hex_str) % 2 != 0:
+            raise ToolError("hex 编码数据长度必须为偶数")
+        try:
+            raw = bytes.fromhex(hex_str)
+        except ValueError as exc:
+            raise ToolError(f"hex 解码失败: {exc}")
+    else:
+        raise ToolError(f"不支持的编码: {encoding}。可选: text, hex")
+
+    if not raw:
+        raise ToolError("发送数据不能为空")
+
+    # Clamp read_timeout
+    read_timeout = min(max(read_timeout, 0.1), 10.0)
+
+    response_lines: list[str] = []
+    actual_sent: int = 0
+
+    try:
+        ser = pyserial.Serial(port=port, baudrate=baud_rate, timeout=0.1)
+    except Exception as exc:
+        raise ToolError(f"无法打开串口 {port}: {exc}")
+
+    try:
+        ser.reset_input_buffer()
+        actual_sent = ser.write(raw)
+        ser.flush()
+
+        if read_response:
+            deadline = time.monotonic() + read_timeout
+            while time.monotonic() < deadline:
+                try:
+                    line_bytes = ser.readline()
+                except Exception:
+                    break
+                if line_bytes:
+                    try:
+                        line = line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
+                    except Exception:
+                        line = str(line_bytes)
+                    response_lines.append(line)
+    finally:
+        ser.close()
+
+    result: dict[str, Any] = {
+        "sent": actual_sent,
+        "data": _summarize_data(raw, encoding),
+    }
+    if read_response:
+        result["response_lines"] = len(response_lines)
+        result["response"] = "\n".join(response_lines) if response_lines else "(无响应)"
+
+    return result
+
+
+def _summarize_data(raw: bytes, encoding: str) -> str:
+    """Create a human-readable summary of the sent data payload."""
+    if encoding == "hex":
+        if len(raw) <= 50:
+            return raw.hex(" ")
+        return raw[:50].hex(" ") + f"... ({len(raw)} bytes)"
+    else:
+        text = raw.decode("utf-8", errors="replace").replace("\r", "\\r").replace("\n", "\\n")
+        if len(raw) <= 50:
+            return text
+        return f"{text[:50]}... ({len(raw)} bytes)"
+
+
+# ======================================================================
 # MCP server setup
 # ======================================================================
 
@@ -730,9 +883,18 @@ mcp.add_tool(
     description=(
         "列出系统所有可用串口。每项包含 port、description、VID、PID、role。\n"
         "role=fk_control → FK-01 主控口 (MCP 内部使用，不能用于烧录/日志)\n"
-        "role=fk_flash   → CH340C 烧录口 (flashkey_flash / flashkey_log 用这个)\n"
+        "role=fk_log     → WCH-LinkE VCP (FK-01 v0.1.1 日志/烧录口，最高 921600)\n"
         "role=unknown    → 其他设备\n"
         "烧录或采集日志前，务必先调用此工具确认端口 role。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_module_info, require_auth=False),
+    name="flashkey_module_info",
+    description=(
+        "查询 FlashKey 扩展模块状态（无需认证）。"
+        "返回模块是否在线(present)、模块身份(module)、已注册的 mod_* 动态工具列表(tools)、"
+        "以及模块自主上报数据的统计(data)。"
     ),
 )
 
@@ -785,6 +947,19 @@ mcp.add_tool(
     _tool_wrapper(_tool_v5v_get),
     name="flashkey_v5v_get",
     description="读取 5V 电源当前状态。需要认证。",
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_vusb_set),
+    name="flashkey_vusb_set",
+    description=(
+        "控制外置 USB-A 电源输出 (PA0, 低电平有效)：value=True 拉低 PA0 = 开启/启动，"
+        "value=False 拉高 PA0 = 关闭。默认关闭。需要认证。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_vusb_get),
+    name="flashkey_vusb_get",
+    description="读取外置 USB-A 电源当前状态 (True=开启/PA0低, False=关闭/PA0高)。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_v3v3_set),
@@ -870,6 +1045,14 @@ mcp.add_tool(
     name="flashkey_get_uid",
     description="读取 FK-01 设备唯一 ID (16 字符 hex 字符串)。需要认证。",
 )
+mcp.add_tool(
+    _tool_wrapper(_tool_get_events, require_auth=False),
+    name="flashkey_get_events",
+    description=(
+        "读取服务器已记录的 FlashKey 事件（如用户手动操作 PB8/PB9 按键），"
+        "每条包含事件名、按键、动作和操作时间戳。无需认证。"
+    ),
+)
 
 # Deprecated (replaced by flashkey_status)
 mcp.add_tool(
@@ -896,18 +1079,19 @@ mcp.add_tool(
     description=(
         "⚡ 一键烧录固件到目标芯片 (阻塞操作，耗时 10-120 秒)。\n"
         "\n"
-        "⚠️ 端口选择：先用 flashkey_list_ports() 查看端口列表，选择 role=fk_flash 的端口。\n"
+        "⚠️ 端口选择：先用 flashkey_list_ports() 查看端口列表，选择 role=fk_log (WCH-LinkE VCP) 的端口。\n"
         "绝对不能使用 role=fk_control 的端口（那是 FK-01 主控口，MCP 内部专用）。\n"
         "不要根据端口名猜测角色，不同系统上名字不同 (COMx / ttyACMx / ttyUSBx / cu.*)。\n"
+        "注意：WCH-LinkE VCP (fk_log) 最高仅支持 921600，需要更高波特率时请用外接 USB-UART。\n"
         "\n"
         "支持两种烧录模式:\n"
         "  BL602: 串口打断模式 (BOOT 拉高 → make flash 通过 DTR 复位并握手 → 烧录完成)。\n"
-        "         FK-01 只控制 BOOT，复位由 CH340C 的 DTR 处理。\n"
+        "         FK-01 只控制 BOOT，复位由串口桥 (WCH-LinkE VCP) 的 DTR 处理。\n"
         "         mode 参数对 BL602 无效。\n"
         "  BL616/BL618 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
-        "  flash_port: 烧录串口 — 必须选 flashkey_list_ports() 中 role=fk_flash 的端口\n"
+        "  flash_port: 烧录串口 — 必须选 flashkey_list_ports() 中 role=fk_log 的端口\n"
         "  chip: 芯片类型，支持 bl602/bl616/bl618\n"
         "  baud_rate: 烧录波特率 (bl602 默认 921600, bl616/bl618 默认 2000000)\n"
         "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 占位符)\n"
@@ -921,15 +1105,33 @@ mcp.add_tool(
     name="flashkey_log",
     description=(
         "📋 采集目标芯片串口日志 (需要认证)。\n"
-        "⚠️ 端口选择：先用 flashkey_list_ports() 查看端口列表，选择 role=fk_flash 的端口。绝对不能用 role=fk_control 的端口。\n"
+        "⚠️ 端口选择：先用 flashkey_list_ports() 查看端口列表，选择 role=fk_log (WCH-LinkE VCP) 的端口。绝对不能用 role=fk_control 的端口。\n"
         "参数:\n"
-        "  port: 日志串口 — 必须选 flashkey_list_ports() 中 role=fk_flash 的端口 (与 flash_port 相同)\n"
+        "  port: 日志串口 — 必须选 flashkey_list_ports() 中 role=fk_log 的端口\n"
         "  baud_rate: 日志波特率，默认 115200\n"
         "  duration: 采集时长(秒)，默认 2，最大 30\n"
         "  max_lines: 返回最大行数，grep 过滤后截取，默认 50\n"
         "  grep: 过滤关键词(子串匹配，不区分大小写)，None 表示不过滤\n"
         "返回: lines(实际行数)、duration(采集时长)、truncated(是否截断)、content(日志文本)\n"
         "与 flashkey_flash 互斥，串口忙时返回 isError。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_send),
+    name="flashkey_send",
+    description=(
+        "📤 向目标芯片发送串口数据 (需要认证)。\n"
+        "⚠️ 端口选择：先用 flashkey_list_ports() 查看端口列表，选择 role=fk_log (WCH-LinkE VCP) 的端口。绝对不能使用 role=fk_control 的端口。\n"
+        "参数:\n"
+        "  port: 目标串口 — 必须选 flashkey_list_ports() 中 role=fk_log 的端口\n"
+        "  data: 要发送的数据字符串\n"
+        "  baud_rate: 波特率，默认 115200\n"
+        "  encoding: 编码方式 — \"text\"(默认，支持 \\n \\r \\t 转义) 或 \"hex\"(十六进制，空格可选)\n"
+        "  read_response: 发送后是否读取目标芯片的响应，默认 False\n"
+        "  read_timeout: 读取响应的超时秒数，默认 1.0，最大 10.0\n"
+        "返回: sent(发送字节数)、data(数据摘要)；若 read_response=True，还包含 response(响应文本)、response_lines(行数)\n"
+        "与 flashkey_flash 互斥，串口忙时返回 isError。\n"
+        "示例: flashkey_send(port=\"/dev/ttyUSB0\", data=\"AT\\r\\n\", read_response=True) 发送 AT 指令并读取响应"
     ),
 )
 
