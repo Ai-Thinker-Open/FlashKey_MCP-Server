@@ -1,6 +1,6 @@
 [Unit]
 Description=FlashKey FK-01 MCP Server
-Documentation=https://github.com/Ai-Thinker-Open/flashkey-mcp
+Documentation=https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server
 After=network.target
 
 [Service]

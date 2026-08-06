@@ -89,7 +89,7 @@ python3.11 --version 2>/dev/null || python3.12 --version 2>/dev/null || python3.
 ### 1b. 安装 flashkey-mcp
 
 ```bash
-pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
+pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git
 ```
 
 安装后验证：
@@ -110,7 +110,7 @@ ln -sf <实际路径> ~/.local/bin/flashkey-mcp
 如果失败，检查 Python 版本（必须 >= 3.10），或尝试：
 
 ```bash
-pip install --user git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git
+pip install --user git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git
 ```
 
 ---
@@ -146,7 +146,7 @@ flashkey-mcp 是通用 MCP 服务器，任何 MCP 兼容工具都可以使用。
 ### 方式 C：SSE 服务模式（服务独立运行，需工具支持 SSE）
 
 ```bash
-pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
+pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git"
 flashkey-mcp --service install    # 安装 systemd 用户服务
 ```
 
@@ -231,7 +231,7 @@ FK-01 主控芯片是 CH32V203。升级其固件需要 **WCH-LinkE 调试器**�
 
 - `update_available: true` → 有比设备当前更新的固件，进入 4b
 - `package_update_available: true` → 需要先升级 flashkey-mcp 包才能拿到新 hex
-  （`pip install --upgrade git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git`，重启服务）
+  （`pip install --upgrade git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git`，重启服务）
 - `latest_*` 为 null → GitHub 暂无 Release 或网络不可达，按现状使用包内固件
 
 ### 4b. 硬件准备（必须用户手动完成）

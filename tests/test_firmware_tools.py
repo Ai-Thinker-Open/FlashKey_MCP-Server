@@ -84,7 +84,7 @@ def test_check_firmware_update_newer_release(monkeypatch):
         lambda **kw: {
             "tag_name": "v0.2.0",
             "html_url": (
-                "https://github.com/Ai-Thinker-Open/flashkey-mcp/releases/tag/v0.2.0"
+                "https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server/releases/tag/v0.2.0"
             ),
             "body": "Release notes...",
         },

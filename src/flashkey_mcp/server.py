@@ -1229,13 +1229,13 @@ def _handle_upgrade() -> None:
     result = subprocess.run(
         [
             sys.executable, "-m", "pip", "install", "--upgrade",
-            "git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git",
+            "git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git",
         ],
         capture_output=False,
     )
     if result.returncode != 0:
         print("Upgrade failed. Try manually:")
-        print("  pip install --upgrade git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git")
+        print("  pip install --upgrade git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git")
         sys.exit(1)
 
     print("Upgrade complete. Restarting service...")

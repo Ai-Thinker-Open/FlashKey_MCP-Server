@@ -18,14 +18,14 @@ if command -v flashkey-mcp &>/dev/null; then
     info "flashkey-mcp 已安装: $(flashkey-mcp --version 2>&1 | head -1)"
 else
     echo "正在安装 flashkey-mcp..."
-    if pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git 2>/dev/null; then
+    if pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git 2>/dev/null; then
         info "安装成功"
-    elif pip install --user git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git 2>/dev/null; then
+    elif pip install --user git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git 2>/dev/null; then
         info "安装成功 (--user)"
-    elif python3 -m pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git 2>/dev/null; then
+    elif python3 -m pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git 2>/dev/null; then
         info "安装成功 (python3 -m pip)"
     else
-        err "安装失败，请手动执行: pip install git+https://github.com/Ai-Thinker-Open/flashkey-mcp.git"
+        err "安装失败，请手动执行: pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git"
         exit 1
     fi
 
@@ -249,5 +249,5 @@ else
     warn "未检测到已知 AI 工具，无法自动配置。"
     echo ""
     echo "  请参考 README.md 手动配置 MCP："
-    echo "  https://github.com/Ai-Thinker-Open/flashkey-mcp#readme"
+    echo "  https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server#readme"
 fi
