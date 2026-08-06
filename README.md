@@ -1,4 +1,4 @@
-# 🔑 flashkey-mcp
+<h1 align="center">FlashKey-MCP</h1>
 
 > FlashKey FK-01 MCP Server — a universal USB flashing & debugging tool for any MCP-compatible AI assistant.
 

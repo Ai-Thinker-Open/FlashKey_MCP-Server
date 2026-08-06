@@ -1,4 +1,4 @@
-# 🔑 flashkey-mcp
+<h1 align="center">FlashKey-MCP</h1>
 
 > FlashKey FK-01 MCP 服务器 — 通用 USB 烧录调试器，支持任何 MCP 兼容的 AI 工具。
 
