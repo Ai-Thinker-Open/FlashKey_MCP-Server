@@ -2,7 +2,7 @@
 
 > FlashKey FK-01 MCP Server — a universal USB flashing & debugging tool for any MCP-compatible AI assistant.
 
-[![简体中文](https://img.shields.io/badge/简体中文-中文文档-brightgreen)](README.zh.md)
+[![简体中文|README](https://img.shields.io/badge/简体中文-README-brightgreen)](README.zh.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
