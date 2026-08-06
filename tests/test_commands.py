@@ -67,9 +67,9 @@ def test_handshake_success():
         t = MockTransport()
         cmd = FlashKeyCommands(t)
 
-        # Device must return the correct response to our fixed challenge
-        expected_dev_response = auth.compute_response(fixed_challenge, auth.KEY)
-        t.inject_response(0x10, expected_dev_response)
+        # v0.1.2: device only ACKs the challenge with an empty payload
+        # (it no longer echoes its own computed response back).
+        t.inject_response(0x10, b"")
         # Then device returns AUTH_OK after we send our RESPONSE
         t.inject_response(0x13, b"")
 
@@ -81,6 +81,8 @@ def test_handshake_success():
         rsp_cmd, rsp_data = parse_sent_frame(t.last_frame)
         assert rsp_cmd == 0x11, f"Expected RESPONSE cmd, got 0x{rsp_cmd:02X}"
         assert len(rsp_data) == 8, f"Expected 8-byte response, got {len(rsp_data)}"
+        expected_local = auth.compute_response(fixed_challenge, auth.KEY)
+        assert rsp_data == expected_local, "Host must send its locally computed response"
         print("  HANDSHAKE success ✅")
     finally:
         os.urandom = original_urandom
@@ -89,7 +91,7 @@ def test_handshake_success():
 def test_handshake_fail():
     t = MockTransport()
     cmd = FlashKeyCommands(t)
-    t.inject_response(0x10, b"\x22" * 8)
+    t.inject_response(0x10, b"")
     t.inject_response(0x14, b"")
     result = cmd.handshake()
     assert result is False, f"Expected False, got {result}"

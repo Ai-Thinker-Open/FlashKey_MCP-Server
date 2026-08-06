@@ -942,7 +942,7 @@ mcp.add_tool(
 mcp.add_tool(
     _tool_wrapper(_tool_v5v_set),
     name="flashkey_v5v_set",
-    description="控制 5V 电源输出 (PB1, 低电平有效)，value=True 开启。需要认证。",
+    description="控制 5V 电源输出 (PB13, 低电平有效)，value=True 开启。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_v5v_get),

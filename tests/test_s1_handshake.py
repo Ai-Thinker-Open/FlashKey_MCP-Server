@@ -218,27 +218,37 @@ if not ok1:
     if not ok1:
         print(f"  PING (burst): FAIL (collected {len(all_raw)} bytes: {all_raw[:40].hex()})")
 
-# 2. CHALLENGE → device computes response
-print("\n--- 2. CHALLENGE → RESPONSE ---")
+# 2. CHALLENGE → 空应答（v0.1.2：设备不再回传自身计算的响应，防自答重放）
+print("\n--- 2. CHALLENGE → 空应答 ---")
 chal = os.urandom(8)
 f = send_and_recv(0x10, chal)
-if f and f[1] == 0x10:
-    dev_resp = f[2]
-    local_resp = compute_response(chal)
-    match = dev_resp == local_resp
-    print(f"  CHALLENGE: PASS ✅ (device returned response)")
-    print(f"    Device: {dev_resp.hex()}")
-    print(f"    Local:  {local_resp.hex()}")
-    print(f"    Algorithm match: {'✅' if match else '❌ MISMATCH!'}")
+local_resp = compute_response(chal) if f else b""
+if f and f[1] == 0x10 and len(f[2]) == 0:
+    print(f"  CHALLENGE: PASS ✅ (device stored challenge, empty ACK)")
     ok2 = True
 else:
-    print(f"  CHALLENGE: FAIL (got: cmd=0x{f[1]:02X} data={f[2].hex() if f else 'NONE'})")
+    print(f"  CHALLENGE: FAIL (got: cmd=0x{f[1]:02X} data={f[2].hex() if f else 'NONE'}, 期望空应答)")
     ok2 = False
-    dev_resp = None
 
-# 3. Correct response → AUTH_OK
-print("\n--- 3. 正确密钥 → AUTH_OK(0x13) ---")
+# 2b. 重放防护：把设备“应答”（现在为空）原样回填 RESPONSE 必须失败
+print("\n--- 2b. 自答重放 → 必须 AUTH_FAIL(0x14) ---")
+ok2b = False
 if ok2:
+    time.sleep(0.1)
+    f = send_and_recv(0x11, b"")   # 原样回填设备回传（空）载荷
+    if f and f[1] == 0x14:
+        print(f"  REPLAY-GUARD: PASS ✅ (空回填 RESPONSE → AUTH_FAIL)")
+        ok2b = True
+    elif f:
+        print(f"  REPLAY-GUARD: FAIL (got cmd=0x{f[1]:02X}, expected 0x14, data={f[2].hex()})")
+    else:
+        print(f"  REPLAY-GUARD: FAIL (no response)")
+else:
+    print(f"  REPLAY-GUARD: SKIP (challenge failed)")
+
+# 3. 本地计算正确响应 → AUTH_OK
+print("\n--- 3. 本地计算正确密钥 → AUTH_OK(0x13) ---")
+if ok2 and ok2b:
     time.sleep(0.1)
     f = send_and_recv(0x11, local_resp)
     if f and f[1] == 0x13:
@@ -251,7 +261,7 @@ if ok2:
         print(f"  AUTH_OK: FAIL (no response)")
         ok3 = False
 else:
-    print(f"  AUTH_OK: SKIP (no challenge response)")
+    print(f"  AUTH_OK: SKIP (challenge/replay-guard failed)")
     ok3 = False
 
 # 4. Wrong response → AUTH_FAIL
@@ -287,9 +297,8 @@ print("   - 测试脚本: test_s1_handshake.py (已修正 AUTH_OK=0x13, AUTH_FAI
 print()
 print("2. 测试结果")
 print(f"   {'✅' if ok1 else '❌'} PING → PONG: {'PASS' if ok1 else 'FAIL'}")
-print(f"   {'✅' if ok2 else '❌'} CHALLENGE → RESPONSE: {'PASS' if ok2 else 'FAIL'}")
-if ok2:
-    print(f"   {'✅' if match else '❌'} Auth 算法一致性: {'PASS' if match else 'FAIL (local vs device mismatch)'} ")
+print(f"   {'✅' if ok2 else '❌'} CHALLENGE → 空应答: {'PASS' if ok2 else 'FAIL'}")
+print(f"   {'✅' if ok2b else '❌'} 自答重放防护: {'PASS' if ok2b else 'FAIL'}")
 print(f"   {'✅' if ok3 else '❌'} 正确密钥 → AUTH_OK(0x13): {'PASS' if ok3 else 'FAIL'}")
 print(f"   {'✅' if ok4 else '❌'} 错误密钥 → AUTH_FAIL(0x14): {'PASS' if ok4 else 'FAIL'}")
 print()
@@ -298,15 +307,15 @@ print("   - 初始状态: OFF (HIGH)")
 print("   - 认证通过后: ON (LOW)")
 print("   - 认证失败后: OFF (HIGH)")
 print()
-all_ok = ok1 and ok2 and ok3 and ok4 and match
+all_ok = ok1 and ok2 and ok2b and ok3 and ok4
 print(f"4. 结论: {'✅ 全部PASS' if all_ok else '❌ 部分FAIL'}")
 if not all_ok:
     fails = []
     if not ok1: fails.append("PING→PONG")
-    if not ok2: fails.append("CHALLENGE")
+    if not ok2: fails.append("CHALLENGE 空应答")
+    if not ok2b: fails.append("自答重放防护")
     if not ok3: fails.append("AUTH_OK")
     if not ok4: fails.append("AUTH_FAIL")
-    if ok2 and not match: fails.append("算法一致性")
     print(f"   失败项: {', '.join(fails)}")
 print()
 print("=" * 52)

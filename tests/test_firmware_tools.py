@@ -36,7 +36,7 @@ def test_version_compare():
 
 def test_bundled_manifest_parses():
     manifest = firmware_tools.bundled_manifest()
-    assert manifest and manifest.get("version") == "0.1.1"
+    assert manifest and manifest.get("version") == "0.1.2"
     assert len(manifest.get("md5", "")) == 32
     assert len(manifest.get("sha256", "")) == 64
 
@@ -71,7 +71,7 @@ def test_check_firmware_update_offline_device(monkeypatch):
     assert result["latest_mcp_version"] is None
     assert result["update_available"] is False
     assert result["package_update_available"] is False
-    assert result["bundled_hex_version"] == "0.1.1"
+    assert result["bundled_hex_version"] == "0.1.2"
 
 
 def test_check_firmware_update_newer_release(monkeypatch):

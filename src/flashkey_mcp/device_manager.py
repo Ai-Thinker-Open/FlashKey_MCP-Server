@@ -35,6 +35,8 @@ from flashkey_mcp.protocol import FrameParser
 from flashkey_mcp.commands import CMD_EVT_BUTTON, CMD_EVT_MODULE_DATA, CMD_HELLO
 from flashkey_mcp.events import EventRecorder
 from flashkey_mcp.modules import ModuleRegistry
+from flashkey_mcp.singleton import acquire as acquire_instance_lock
+from flashkey_mcp.singleton import release as release_instance_lock
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,8 @@ class DeviceManager:
             self._monitor_thread.join(timeout=3.0)
         self._close_device()
         self._cleanup_inotify()
+        # 释放进程级单实例锁，允许其他 flashkey-mcp 实例接管设备
+        release_instance_lock()
 
     # ------------------------------------------------------------------
     # Guard for MCP tools
@@ -336,7 +340,20 @@ class DeviceManager:
         or as a fallback we use a short-interval poll.
         """
         logger.info("Waiting for FK-01 device...")
+        lock_logged = False
         while not self._stop_event.is_set():
+            # 单实例锁：防止多个 flashkey-mcp 进程同时打开 FK-01 串口互抢
+            if not acquire_instance_lock():
+                if not lock_logged:
+                    logger.warning(
+                        "检测到其他 flashkey-mcp 实例占用 FK-01 设备，"
+                        "等待其退出后接管..."
+                    )
+                    lock_logged = True
+                self._sleep_or_watch(_FALLBACK_POLL_INTERVAL)
+                continue
+            lock_logged = False
+
             info = find_port()
             if info is not None:
                 try:

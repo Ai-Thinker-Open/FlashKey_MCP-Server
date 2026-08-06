@@ -1,6 +1,6 @@
 {
-  "version": "0.1.1",
-  "md5": "780f3136137153e6313df89f4baf09d6",
-  "sha256": "999242280dec95eeac1a1923920112d936e462d6c63b8368923458dc95bef568",
-  "changelog": "v0.1.1: HELLO 自动握手状态机、按键事件上报与 Flash 事件日志缓存、扩展模块桥接（I2C1 清单 + USART2 透传 0x60~0x64）、3V3_EN 引脚调整至 PB12。"
+  "version": "0.1.2",
+  "md5": "d4bd11206b80c6ad628b3c18306a256f",
+  "sha256": "766359d69a4f1c6b5755f3d555976bf14721998b347d12b0c1e4bef10d021005",
+  "changelog": "v0.1.2: 随 flashkey-mcp 发布的 FK-01 固件（构建来源: /home/seahi/workspace/FlashKey）"
 }

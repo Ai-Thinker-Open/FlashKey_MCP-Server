@@ -198,8 +198,10 @@ class FlashKeyCommands:
 
         Protocol:
             1. Generate a random 8-byte challenge.
-            2. Send ``CHALLENGE`` → device computes and returns its response.
-            3. Compute local response and send ``RESPONSE``.
+            2. Send ``CHALLENGE`` → device stores it and returns an empty
+               acknowledgment (v0.1.2: the device no longer echoes its own
+               computed response back — that made the response replayable).
+            3. Compute the response locally and send ``RESPONSE``.
             4. Device returns ``AUTH_OK`` (0x13) or ``AUTH_FAIL`` (0x14).
 
         Args:
@@ -214,13 +216,12 @@ class FlashKeyCommands:
         # Step 1: generate random challenge
         challenge = os.urandom(8)
 
-        # Step 2: send CHALLENGE, get device-computed response
-        _rsp_cmd, dev_response = self._transceive(CMD_CHALLENGE, challenge)
+        # Step 2: send CHALLENGE — device stores it, returns empty ACK.
+        #         (Do not rely on any payload: v0.1.2 replies empty.)
+        _rsp_cmd, _ack = self._transceive(CMD_CHALLENGE, challenge)
 
-        # Step 3: verify device response matches local computation
+        # Step 3: compute response locally (only the host knows the key)
         local_response = compute_response(challenge, key)
-        if dev_response != local_response:
-            return False  # device returned wrong response
 
         # Step 4: send local response
         rsp_cmd, _rsp_data = self._transceive(CMD_RESPONSE, local_response)
