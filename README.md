@@ -43,11 +43,9 @@ The script will:
 pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git
 ```
 
-For SSE support:
-
-```bash
-pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git"
-```
+> The starlette / uvicorn dependencies required by SSE mode are included in
+> the default install. The `flashkey-mcp[sse]` extra is kept only for
+> compatibility with older install commands.
 
 ### Install from source (developers)
 
@@ -61,9 +59,33 @@ pip install -e .
 
 ## Usage
 
-flashkey-mcp runs as a stdio MCP server. **The MCP configuration is essentially the same for every tool: tell the tool to launch a stdio subprocess with the `flashkey-mcp` command.**
+flashkey-mcp runs in **SSE (HTTP) mode by default**: one long-lived daemon
+serves every AI session, so multiple sessions share the same FK-01 without
+serial-port preemption or interleaved handshakes.
 
-### Manual configuration
+### Step 1: Start the daemon
+
+**Linux (recommended — systemd user service, auto-start + auto-restart)**
+
+```bash
+flashkey-mcp --service install
+```
+
+**Windows / macOS (run manually)**
+
+```bash
+flashkey-mcp --sse --host 127.0.0.1 --port 8100
+```
+
+> `--sse` is optional (SSE is the default). The endpoint is
+> `http://127.0.0.1:8100/sse`. If the port is already in use by another
+> flashkey-mcp instance, the program prints a friendly hint and exits 0
+> instead of binding again.
+
+### Step 2: Point your AI tools at the endpoint
+
+Every tool's MCP config is essentially the same: connect to the SSE endpoint
+above instead of launching a subprocess.
 
 #### JSON format (Claude Code / Claude Desktop / Cline / VS Code)
 
@@ -73,7 +95,8 @@ Add the following to your tool's MCP config file:
 {
   "mcpServers": {
     "flashkey": {
-      "command": "flashkey-mcp"
+      "type": "sse",
+      "url": "http://127.0.0.1:8100/sse"
     }
   }
 }
@@ -93,8 +116,8 @@ Add the following to your tool's MCP config file:
 ```yaml
 mcp_servers:
   flashkey:
-    command: flashkey-mcp
-    args: []
+    type: sse
+    url: http://127.0.0.1:8100/sse
     enabled: true
 ```
 
@@ -102,13 +125,13 @@ mcp_servers:
 
 Settings → MCP → Add new MCP server:
 - Name: `flashkey`
-- Type: `command`
-- Command: `flashkey-mcp`
+- Type: `sse`
+- URL: `http://127.0.0.1:8100/sse`
 
 #### MiMo Code
 
 ```bash
-mimo mcp add flashkey-mcp --command flashkey-mcp
+mimo mcp add flashkey-mcp --transport sse --url http://127.0.0.1:8100/sse
 ```
 
 Or add to `mimocode.json` in the project root:
@@ -117,18 +140,56 @@ Or add to `mimocode.json` in the project root:
 {
   "mcp": {
     "flashkey-mcp": {
-      "type": "local",
-      "command": ["flashkey-mcp"]
+      "type": "sse",
+      "url": "http://127.0.0.1:8100/sse"
     }
   }
 }
 ```
+
+#### Codex (OpenAI)
+
+```bash
+codex mcp add flashkey-mcp --url http://127.0.0.1:8100/mcp
+```
+
+### Multiple AI sessions / clients sharing one FK-01
+
+Any number of sessions on the same machine (Claude, Cursor, Codex, …) simply
+use the same URL. The device is held by the single daemon, so sessions never
+interfere with each other:
+
+- Linux: the service restarts automatically after a crash; no action needed.
+- Windows / macOS: keep the daemon running; watch logs with
+  `tail -f /tmp/flashkey-mcp.log`.
+
+### Idle port release (heartbeat note)
+
+After **30 seconds** without a tool call, the daemon closes the FK-01
+serial port and the firmware heartbeat (PING) pauses with it. The next
+tool call reconnects automatically and re-runs the ~5s handshake, then
+the heartbeat resumes. This keeps the port free for other programs (or
+WSL USB remapping) while the daemon is idle:
+
+- Adjust the idle timeout with `FLASHKEY_IDLE_TIMEOUT=60 flashkey-mcp`
+- Set it to `0` to disable idle release (always keep the connection)
+- `flashkey_status()` reports `idle: true` while the port is released
+- Long operations (flash / log capture) never trigger a release
+
+### Legacy stdio mode (single session)
+
+For a single session you can still run `flashkey-mcp --stdio` and configure
+`{"command": "flashkey-mcp"}`. Note that stdio means "one process per
+session" — multiple sessions will fight over the same FK-01, so prefer SSE.
 
 ### Verify the installation
 
 ```bash
 # Version check
 flashkey-mcp --version
+
+# Service status (Linux)
+flashkey-mcp --service status
 
 # Config check: restart your AI tool, then call it in a conversation
 flashkey_status()
@@ -217,9 +278,13 @@ A: The tool automatically retries with an unlocked full-chip erase + flash; if i
 
 A: The WCH-LinkE VCP (fk_log) only supports up to 921600; use an external USB-UART for higher baud rates.
 
+**Q: The serial port was released after sitting idle?**
+
+A: This is by design: after 30s without tool calls the port closes and the heartbeat pauses; the next call reconnects (~5s handshake). Disable with `FLASHKEY_IDLE_TIMEOUT=0` or adjust the idle seconds.
+
 **Q: The tool says an update is available?**
 
-A: Run `pip install --upgrade git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git` and restart the MCP server.
+A: Run `pip install --upgrade git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git` and restart the MCP server. For the Linux daemon, run `systemctl --user restart flashkey-mcp` (or check with `flashkey-mcp --service status`).
 
 ---
 

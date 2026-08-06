@@ -12,20 +12,20 @@ err()   { echo -e "${RED}[✗]${NC} $*"; }
 header(){ echo -e "\n${BOLD}═══ $* ═══${NC}"; }
 
 # ─── 步骤 1: 安装 flashkey-mcp ────────────────────────────────────────
-header "步骤 1/2: 安装 flashkey-mcp"
+header "步骤 1/3: 安装 flashkey-mcp"
 
 if command -v flashkey-mcp &>/dev/null; then
     info "flashkey-mcp 已安装: $(flashkey-mcp --version 2>&1 | head -1)"
 else
     echo "正在安装 flashkey-mcp..."
-    if pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git 2>/dev/null; then
+    if pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git" 2>/dev/null; then
         info "安装成功"
-    elif pip install --user git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git 2>/dev/null; then
+    elif pip install --user "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git" 2>/dev/null; then
         info "安装成功 (--user)"
-    elif python3 -m pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git 2>/dev/null; then
+    elif python3 -m pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git" 2>/dev/null; then
         info "安装成功 (python3 -m pip)"
     else
-        err "安装失败，请手动执行: pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git"
+        err "安装失败，请手动执行: pip install \"flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git\""
         exit 1
     fi
 
@@ -40,8 +40,37 @@ else
     fi
 fi
 
-# ─── 步骤 2: 配置 AI 工具 ────────────────────────────────────────────
-header "步骤 2/2: 配置 AI 工具"
+# ─── 步骤 2: 启动 SSE 常驻服务 ───────────────────────────────────────
+header "步骤 2/3: 启动 SSE 常驻服务"
+
+SERVICE_OK=0
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    if flashkey-mcp --service install >/dev/null 2>&1; then
+        info "常驻服务已安装并启动: http://127.0.0.1:8100/sse"
+        SERVICE_OK=1
+    else
+        warn "systemd 服务安装失败，尝试后台常驻方式..."
+    fi
+fi
+
+if [ "$SERVICE_OK" -eq 0 ] && command -v flashkey-mcp >/dev/null 2>&1; then
+    nohup flashkey-mcp --sse --host 127.0.0.1 --port 8100 >>/tmp/flashkey-mcp-sse.log 2>&1 &
+    SSE_PID=$!
+    sleep 1
+    if kill -0 "$SSE_PID" 2>/dev/null; then
+        info "SSE 常驻服务已启动 (PID $SSE_PID): http://127.0.0.1:8100/sse"
+        SERVICE_OK=1
+    else
+        warn "SSE 服务启动失败，请手动运行: flashkey-mcp --sse"
+    fi
+fi
+
+if [ "$SERVICE_OK" -eq 0 ]; then
+    warn "未启动常驻服务。请先运行: flashkey-mcp --sse，再配置下方 AI 工具。"
+fi
+
+# ─── 步骤 3: 配置 AI 工具 ────────────────────────────────────────────
+header "步骤 3/3: 配置 AI 工具"
 
 CONFIGURED=0
 
@@ -67,7 +96,7 @@ configure_claude_code() {
 import json, sys
 with open('$config_file') as f:
     cfg = json.load(f)
-cfg.setdefault('mcpServers', {})['$server_name'] = {'command': 'flashkey-mcp'}
+cfg.setdefault('mcpServers', {})['$server_name'] = {'type': 'sse', 'url': 'http://127.0.0.1:8100/sse'}
 with open('$config_file', 'w') as f:
     json.dump(cfg, f, indent=2)
     f.write('\n')
@@ -84,7 +113,8 @@ print('ok')
 {
   "mcpServers": {
     "flashkey": {
-      "command": "flashkey-mcp"
+      "type": "sse",
+      "url": "http://127.0.0.1:8100/sse"
     }
   }
 }
@@ -135,13 +165,13 @@ configure_claude_desktop() {
 import json, sys
 with open('$config_file') as f:
     cfg = json.load(f)
-cfg.setdefault('mcpServers', {})['flashkey'] = {'command': 'flashkey-mcp'}
+cfg.setdefault('mcpServers', {})['flashkey'] = {'type': 'sse', 'url': 'http://127.0.0.1:8100/sse'}
 with open('$config_file', 'w') as f:
     json.dump(cfg, f, indent=2)
     f.write('\n')
 " 2>/dev/null && info "Claude Desktop: 已添加配置" && CONFIGURED=$((CONFIGURED + 1))
     else
-        printf '{\n  "mcpServers": {\n    "flashkey": {\n      "command": "flashkey-mcp"\n    }\n  }\n}\n' > "$config_file"
+        printf '{\n  "mcpServers": {\n    "flashkey": {\n      "type": "sse",\n      "url": "http://127.0.0.1:8100/sse"\n    }\n  }\n}\n' > "$config_file"
         info "Claude Desktop: 已创建配置"
         CONFIGURED=$((CONFIGURED + 1))
     fi
@@ -163,13 +193,13 @@ configure_cline() {
 import json, sys
 with open('$config_file') as f:
     cfg = json.load(f)
-cfg.setdefault('mcpServers', {})['flashkey'] = {'command': 'flashkey-mcp'}
+cfg.setdefault('mcpServers', {})['flashkey'] = {'type': 'sse', 'url': 'http://127.0.0.1:8100/sse'}
 with open('$config_file', 'w') as f:
     json.dump(cfg, f, indent=2)
     f.write('\n')
 " 2>/dev/null && info "Cline: 已添加配置" && CONFIGURED=$((CONFIGURED + 1))
     else
-        printf '{\n  "mcpServers": {\n    "flashkey": {\n      "command": "flashkey-mcp"\n    }\n  }\n}\n' > "$config_file"
+        printf '{\n  "mcpServers": {\n    "flashkey": {\n      "type": "sse",\n      "url": "http://127.0.0.1:8100/sse"\n    }\n  }\n}\n' > "$config_file"
         info "Cline: 已创建配置 (~/.cline/mcp.json)"
         CONFIGURED=$((CONFIGURED + 1))
     fi
@@ -192,15 +222,15 @@ configure_hermes() {
             echo "mcp_servers:" >> "$config_file"
         fi
         echo "  flashkey:" >> "$config_file"
-        echo "    command: flashkey-mcp" >> "$config_file"
-        echo "    args: []" >> "$config_file"
+        echo "    type: sse" >> "$config_file"
+        echo "    url: http://127.0.0.1:8100/sse" >> "$config_file"
         echo "    enabled: true" >> "$config_file"
     else
         cat > "$config_file" << 'YAMLEOF'
 mcp_servers:
   flashkey:
-    command: flashkey-mcp
-    args: []
+    type: sse
+    url: http://127.0.0.1:8100/sse
     enabled: true
 YAMLEOF
     fi
@@ -219,7 +249,7 @@ configure_mimo() {
     fi
     # MiMo 的 mimocode.json 格式特殊，仅在有该工具时处理
     if command -v mimo &>/dev/null; then
-        mimo mcp add flashkey-mcp --command flashkey-mcp 2>/dev/null && {
+        mimo mcp add flashkey-mcp --transport sse --url http://127.0.0.1:8100/sse 2>/dev/null && {
             info "MiMo Code: 已添加 MCP"
             CONFIGURED=$((CONFIGURED + 1))
         }
@@ -241,8 +271,9 @@ if [ "$CONFIGURED" -gt 0 ]; then
     echo ""
     echo -e "  ${BOLD}下一步:${NC}"
     echo -e "  1. ${BOLD}重启${NC}你的 AI 工具使配置生效"
-    echo -e "  2. 插入 FlashKey FK-01"
-    echo -e "  3. 在 AI 工具中调用 ${BOLD}flashkey_status()${NC} 确认连接"
+    echo -e "  2. 确认常驻服务已启动: ${BOLD}http://127.0.0.1:8100/sse${NC}（Linux 可执行 ${BOLD}flashkey-mcp --service status${NC}）"
+    echo -e "  3. 插入 FlashKey FK-01"
+    echo -e "  4. 在 AI 工具中调用 ${BOLD}flashkey_status()${NC} 确认连接"
     echo ""
     echo -e "  如需烧录知识：在 AI 对话中说 ${BOLD}\"加载 flashkey-mcp skill\"${NC}"
 else

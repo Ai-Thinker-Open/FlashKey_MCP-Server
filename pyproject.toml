@@ -10,9 +10,13 @@ requires-python = ">=3.10"
 dependencies = [
     "pyserial>=3.5",
     "mcp>=1.0,<2",
+    # SSE 是默认传输方式（共享常驻服务），因此运行时依赖直接内置
+    "starlette>=0.38",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
+# 兼容旧安装命令 `pip install flashkey-mcp[sse]`；依赖已包含在默认安装中
 sse = [
     "starlette>=0.38",
     "uvicorn>=0.30",
@@ -35,6 +39,8 @@ flashkey_mcp = [
     "py.typed",
     "firmware/*.hex",
     "firmware/*.json",
+    "configs/*.service",
+    "configs/*.timer",
     "openocd/*.cfg",
     "openocd/*.txt",
     "openocd/*.md",

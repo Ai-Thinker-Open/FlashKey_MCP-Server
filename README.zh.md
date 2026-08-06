@@ -43,11 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/Ai-Thinker-Open/FlashKey_MCP-Server
 pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git
 ```
 
-需要 SSE 支持时：
-
-```bash
-pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git"
-```
+> SSE 运行所需的 starlette / uvicorn 已包含在默认安装中；`flashkey-mcp[sse]` 写法仅为兼容旧版本保留。
 
 ### 从源码安装（开发者）
 
@@ -61,9 +57,28 @@ pip install -e .
 
 ## 使用说明
 
-flashkey-mcp 以 stdio MCP 服务器方式运行。**所有工具的 MCP 配置本质上相同：告诉工具用 `flashkey-mcp` 命令启动一个 stdio 子进程。**
+flashkey-mcp 默认以 **SSE（HTTP）模式**运行：一个常驻服务进程服务所有 AI 会话，多个会话共享同一台 FK-01，不会出现多进程抢占串口、握手互相打断的问题。
 
-### 手动配置
+### 第一步：启动常驻服务
+
+**Linux（推荐，systemd 用户服务，开机自启 + 崩溃自动重启）**
+
+```bash
+flashkey-mcp --service install
+```
+
+**Windows / macOS（手工常驻）**
+
+```bash
+flashkey-mcp --sse --host 127.0.0.1 --port 8100
+```
+
+> `--sse` 可省略（默认即 SSE）。启动后端点固定为 `http://127.0.0.1:8100/sse`。
+> 若端口已被另一个 flashkey-mcp 实例占用，程序会提示"另一个实例已在运行，直接使用端点即可"并以 0 退出，不会重复占用设备。
+
+### 第二步：配置 AI 工具（连接 URL）
+
+所有工具的 MCP 配置本质相同：让工具连接上述 SSE 端点，而不是启动一个子进程。
 
 #### JSON 格式（Claude Code / Claude Desktop / Cline / VS Code）
 
@@ -73,7 +88,8 @@ flashkey-mcp 以 stdio MCP 服务器方式运行。**所有工具的 MCP 配置�
 {
   "mcpServers": {
     "flashkey": {
-      "command": "flashkey-mcp"
+      "type": "sse",
+      "url": "http://127.0.0.1:8100/sse"
     }
   }
 }
@@ -93,8 +109,8 @@ flashkey-mcp 以 stdio MCP 服务器方式运行。**所有工具的 MCP 配置�
 ```yaml
 mcp_servers:
   flashkey:
-    command: flashkey-mcp
-    args: []
+    type: sse
+    url: http://127.0.0.1:8100/sse
     enabled: true
 ```
 
@@ -102,13 +118,13 @@ mcp_servers:
 
 Settings → MCP → Add new MCP server：
 - 名称：`flashkey`
-- 类型：`command`
-- 命令：`flashkey-mcp`
+- 类型：`sse`
+- URL：`http://127.0.0.1:8100/sse`
 
 #### MiMo Code
 
 ```bash
-mimo mcp add flashkey-mcp --command flashkey-mcp
+mimo mcp add flashkey-mcp --transport sse --url http://127.0.0.1:8100/sse
 ```
 
 或项目根目录 `mimocode.json`：
@@ -117,18 +133,47 @@ mimo mcp add flashkey-mcp --command flashkey-mcp
 {
   "mcp": {
     "flashkey-mcp": {
-      "type": "local",
-      "command": ["flashkey-mcp"]
+      "type": "sse",
+      "url": "http://127.0.0.1:8100/sse"
     }
   }
 }
 ```
+
+#### Codex (OpenAI)
+
+```bash
+codex mcp add flashkey-mcp --url http://127.0.0.1:8100/mcp
+```
+
+### 多个 AI 会话 / 多个客户端共享
+
+同一台机器上的任意数量会话（Claude、Cursor、Codex…）都使用同一个 URL 即可。设备只被唯一的常驻进程持有，会话之间互不干扰：
+
+- Linux：服务崩溃会自动重启，无需干预。
+- Windows / macOS：保持常驻进程运行；日志可 `tail -f /tmp/flashkey-mcp.log` 查看。
+
+### 空闲自动释放串口（心跳说明）
+
+常驻服务在最后一次工具调用后默认 **30 秒**无活动会关闭 FK-01 串口，固件心跳（PING）随之暂停；下一次工具调用会自动重连并重新握手（约 5 秒），随后心跳自动恢复。这样空闲时串口不被长期占用，其他程序（或 WSL 的 USB 重映射）可以正常使用设备：
+
+- 空闲秒数可用环境变量调整：`FLASHKEY_IDLE_TIMEOUT=60 flashkey-mcp`
+- 设为 `0` 禁用空闲释放（一直保持连接，旧行为）
+- 空闲期间 `flashkey_status()` 返回 `idle: true`
+- 烧录、日志采集等长操作期间不会释放串口
+
+### 兼容旧方式：stdio（单会话）
+
+单会话场景仍可用 `flashkey-mcp --stdio` 启动，工具配置为 `{"command": "flashkey-mcp"}`。注意 stdio 是"一个会话一个进程"，多会话同时使用会抢占同一台 FK-01，请优先使用 SSE。
 
 ### 验证安装
 
 ```bash
 # 安装验证
 flashkey-mcp --version
+
+# 服务状态（Linux）
+flashkey-mcp --service status
 
 # 配置验证：重启 AI 工具后，在对话中调用
 flashkey_status()
@@ -217,9 +262,13 @@ A: 工具会自动重试带 unlock 的全片擦除+烧录；仍失败时请用 W
 
 A: WCH-LinkE VCP（fk_log）最高仅支持 921600，需要更高波特率时请改用外接 USB-UART。
 
+**Q: 串口空闲一段时间后被释放了？**
+
+A: 这是设计行为：30 秒无工具调用后自动关闭串口并暂停心跳，下次调用自动重连（约 5 秒握手）。可用 `FLASHKEY_IDLE_TIMEOUT=0` 禁用，或调整空闲秒数。
+
 **Q: 工具提示有新版？**
 
-A: 执行 `pip install --upgrade git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git` 后重启 MCP 服务。
+A: 执行 `pip install --upgrade git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git` 后重启 MCP 服务。Linux 常驻服务可执行 `systemctl --user restart flashkey-mcp`（或 `flashkey-mcp --service status` 确认状态）。
 
 ---
 

@@ -1,15 +1,18 @@
-"""FlashKey FK-01 MCP Server — Stdio (default) or SSE transport.
+"""FlashKey FK-01 MCP Server — SSE (default) or stdio transport.
 
 Usage::
 
-    flashkey-mcp              # stdio mode (default)
-    flashkey-mcp --sse        # SSE on :8100
-    flashkey-mcp --sse --port 8200  # SSE on custom port
+    flashkey-mcp                    # SSE mode (default), on :8100
+    flashkey-mcp --port 8200        # SSE on custom port
+    flashkey-mcp --stdio            # stdio mode (legacy, one process per session)
 
-On startup the server launches :class:`DeviceManager` which immediately
-begins scanning for FK-01, performs the HELLO handshake on detection,
-and maintains a PING keepalive.  By the time the AI makes its first
-tool call, FK-01 may already be authenticated and ready.
+SSE is the default so that one long-lived process can serve every AI
+session (multiple clients share the single FK-01 device without
+serial-port preemption).  On startup the server launches
+:class:`DeviceManager` which immediately begins scanning for FK-01,
+performs the HELLO handshake on detection, and maintains a PING
+keepalive.  By the time the AI makes its first tool call, FK-01 may
+already be authenticated and ready.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import logging
+import socket
 import subprocess
 import sys
 import tempfile
@@ -875,7 +879,9 @@ mcp.add_tool(
     name="flashkey_status",
     description=(
         "查询 FlashKey FK-01 统一状态。不需要认证，始终可调用。"
-        "返回认证状态(authed)、固件版本(version)、引脚状态(boot/rst/v5v/v3v3)。"
+        "返回认证状态(authed)、是否空闲释放串口(idle)、固件版本(version)、"
+        "引脚状态(boot/rst/v5v/v3v3)。"
+        "idle=true 表示串口因空闲超时已释放，下次调用会自动重连。"
     ),
 )
 mcp.add_tool(
@@ -1243,13 +1249,30 @@ def _handle_upgrade() -> None:
     print("Service restarted. Check status: flashkey-mcp --service status")
 
 
+def _service_template_dir() -> Path:
+    """Locate the systemd unit-template directory.
+
+    Prefers templates bundled inside the installed package
+    (``flashkey_mcp/configs/``), falling back to a source checkout
+    (``<repo>/configs``) for editable installs.
+    """
+    pkg_dir = Path(__file__).resolve().parent
+    for base in (
+        pkg_dir / "configs",                # installed package / editable src
+        pkg_dir.parent.parent / "configs",  # legacy: repo top-level configs/
+    ):
+        if (base / "flashkey-mcp.service").exists():
+            return base
+    return pkg_dir / "configs"
+
+
 def _handle_service_command(action: str) -> None:
     """Install / uninstall / check status of systemd user service."""
     import shutil
     import subprocess as _sp
 
     service_name = "flashkey-mcp"
-    unit_file = Path(__file__).resolve().parent.parent.parent / "configs" / f"{service_name}.service"
+    unit_file = _service_template_dir() / f"{service_name}.service"
     user_unit_dir = Path.home() / ".config" / "systemd" / "user"
 
     if action == "status":
@@ -1340,8 +1363,8 @@ def _handle_service_command(action: str) -> None:
 def main() -> None:
     """Launch the FlashKey MCP server.
 
-    Defaults to stdio transport.  Pass ``--sse`` for HTTP SSE mode
-    (requires ``pip install flashkey-mcp[sse]``).
+    Defaults to SSE (HTTP) transport — one shared daemon serves every
+    AI session.  Pass ``--stdio`` for legacy single-session mode.
 
     Service management::
 
@@ -1357,8 +1380,15 @@ def main() -> None:
         description="FlashKey FK-01 MCP Server",
     )
     parser.add_argument(
+        "--transport", type=str, choices=["sse", "stdio"], default="sse",
+        help=(
+            "MCP transport: SSE (default, one shared daemon serves every "
+            "AI session) or stdio (legacy, one process per session)"
+        ),
+    )
+    parser.add_argument(
         "--sse", action="store_true",
-        help="Run in SSE (HTTP) mode instead of default stdio",
+        help="Run in SSE (HTTP) mode (this is the default)",
     )
     parser.add_argument(
         "--port", type=int, default=8100,
@@ -1370,7 +1400,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--stdio", action="store_true",
-        help="Run in stdio mode (this is the default)",
+        help="Run in stdio mode (legacy single-session)",
     )
     parser.add_argument(
         "--debug", action="store_true",
@@ -1398,6 +1428,14 @@ def main() -> None:
         help="Show version and exit",
     )
     args = parser.parse_args()
+
+    # -- Transport resolution ----------------------------------------------
+    # 默认 SSE；`--sse` / `--stdio` 为兼容旧命令的显式开关。
+    transport = args.transport
+    if args.sse:
+        transport = "sse"
+    if args.stdio:
+        transport = "stdio"
 
     # -- Version ---------------------------------------------------------
     if args.version:
@@ -1445,12 +1483,17 @@ def main() -> None:
     # tool call, FK-01 may already be discovered and handshake completed.
     _get_dm()
 
-    if args.sse:
-        # ── SSE mode ────────────────────────────────────────────────
+    if transport == "sse":
+        # ── SSE mode (default) ──────────────────────────────────────
         logger.info("Transport: SSE (HTTP) on %s:%d", args.host, args.port)
+        print(f"FlashKey MCP SSE endpoint: http://{args.host}:{args.port}/sse")
+        print(
+            'MCP client config: {"flashkey": {"type": "sse", '
+            f'"url": "http://{args.host}:{args.port}/sse"}}'
+        )
         _run_sse(args.host, args.port)
     else:
-        # ── Stdio mode (default) ────────────────────────────────────
+        # ── Stdio mode (legacy) ─────────────────────────────────────
         logger.info("Transport: stdio")
         try:
             mcp.run(transport="stdio")
@@ -1468,8 +1511,9 @@ def _run_sse(host: str, port: int) -> None:
         from starlette.routing import Mount, Route
     except ImportError as exc:
         logger.error(
-            "SSE mode requires extra dependencies.  "
-            "Install with: pip install flashkey-mcp[sse]"
+            "SSE mode requires starlette/uvicorn, which are missing from "
+            "this install.  Upgrade with: "
+            "pip install --upgrade flashkey-mcp[sse]"
         )
         raise SystemExit(1) from exc
 
@@ -1502,13 +1546,37 @@ def _run_sse(host: str, port: int) -> None:
         })
 
     sse_app = mcp.sse_app()
+    streamable_app = mcp.streamable_http_app()
+    # Streamable HTTP 会话管理器要求 run() 生命周期；SDK 将 lifespan 保存在
+    # 返回的 Starlette 的 router.lifespan_context 上，复用到顶层 app。
+    streamable_lifespan = streamable_app.router.lifespan_context
+
     app = Starlette(
         routes=[
             Route("/release", endpoint=handle_release, methods=["POST"]),
             Route("/reconnect", endpoint=handle_reconnect, methods=["POST"]),
-            Mount("/", app=sse_app),
+            # Streamable HTTP（Codex 等客户端）：SDK 内部已注册 /mcp 路由
+            *streamable_app.routes,
+            # SSE（兼容旧客户端）：SDK 内部已注册 /sse 与 /messages 路由
+            *sse_app.routes,
         ],
+        lifespan=lambda _app: streamable_lifespan(_app),
     )
+
+    # 端口占用检查：另一个 flashkey-mcp 实例已在运行时给出友好提示，
+    # 而不是抛出一串 bind traceback（多会话场景下这是正常情况）。
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError:
+            print(
+                f"另一个 flashkey-mcp 实例已在 {host}:{port} 运行。\n"
+                f"直接使用端点即可: http://{host}:{port}/sse\n"
+                f'MCP 客户端配置: {{"flashkey": {{"type": "sse", '
+                f'"url": "http://{host}:{port}/sse"}}}}'
+            )
+            raise SystemExit(0) from None
 
     logger.info("Starting FlashKey MCP SSE server at http://%s:%d", host, port)
     try:

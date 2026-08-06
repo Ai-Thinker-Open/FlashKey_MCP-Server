@@ -14,6 +14,11 @@ state machine::
          |              v            |
          +---- (timeout/fail)  (PING lost)
 
+    AUTHED -> IDLE  (serial port released after an idle timeout; the
+                     firmware heartbeat pauses together with the port)
+    IDLE   -> DISCONNECTED  (woken by the next tool call, which triggers
+                             re-detection + full re-handshake)
+
 Device discovery on Linux uses an inotify watcher thread (stdlib, zero
 extra dependencies) to react to ``/dev/ttyACM*`` creation/removal
 without polling.  On Windows or if inotify fails, a lightweight
@@ -63,6 +68,14 @@ _FALLBACK_POLL_INTERVAL: float = 1.0
 # Extension-module manifest poll interval while AUTHED
 _MODULE_POLL_INTERVAL: float = 10.0
 
+# 空闲释放串口：最后一次工具调用后超过该秒数无活动则关闭串口。
+# 固件心跳（PING）随端口一起暂停；下次工具调用自动重连并重新握手。
+# 设为 0 可禁用空闲释放（一直保持连接，旧行为）。
+_IDLE_TIMEOUT_S: float = float(os.environ.get("FLASHKEY_IDLE_TIMEOUT", "30"))
+
+# require_authed() 从 IDLE 唤醒后等待"重新检测 + 握手"完成的超时
+_WAKE_TIMEOUT_S: float = _TOTAL_HANDSHAKE_BUDGET + 3.0
+
 # ---------------------------------------------------------------------------
 # Error messages (需求 2.5)
 # ---------------------------------------------------------------------------
@@ -85,6 +98,7 @@ class DeviceState(Enum):
     DISCONNECTED = auto()  # no device detected
     CONNECTING = auto()  # device found, attempting handshake
     AUTHED = auto()  # fully authenticated, PING keepalive active
+    IDLE = auto()  # port released after idle timeout; reconnects on demand
 
 
 class DeviceManager:
@@ -111,6 +125,7 @@ class DeviceManager:
         self._stop_event = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._pause_keepalive: bool = False  # suppress PING during flash ops
+        self._last_activity: float = 0.0  # last tool-driven activity (monotonic)
         self._recorder = EventRecorder()
         self._module_registry: ModuleRegistry | None = None
 
@@ -185,16 +200,53 @@ class DeviceManager:
     def resume_keepalive(self) -> None:
         """Resume PING keepalive after flash completes."""
         self._pause_keepalive = False
+        self.mark_active()  # 长操作结束视为一次活动，空闲计时重新开始
         logger.debug("PING keepalive resumed")
 
+    def mark_active(self) -> None:
+        """Record tool-driven device activity (resets the idle-release timer)."""
+        with self._lock:
+            self._last_activity = time.monotonic()
+
     def require_authed(self) -> None:
-        """Raise ``RuntimeError`` with a Chinese i18n message if not authed."""
+        """Raise ``RuntimeError`` with a Chinese i18n message if not authed.
+
+        If the port was released by the idle timeout, this wakes the monitor
+        thread and waits for re-detection + handshake before returning, so
+        tool calls always see a ready (heartbeat-running) session.
+        """
         with self._lock:
             state = self._state
             error = self._last_error
 
         if state is DeviceState.AUTHED:
+            self.mark_active()
             return
+
+        if state is DeviceState.IDLE:
+            # 空闲释放后的第一次工具调用：回到 DISCONNECTED 并唤醒监控线程，
+            # 由它执行完整的"检测 → 打开串口 → HELLO 握手 → 恢复心跳"流程。
+            with self._lock:
+                self._state = DeviceState.DISCONNECTED
+                self._last_error = ""
+            self._wake_monitor()
+            deadline = time.monotonic() + _WAKE_TIMEOUT_S
+            while time.monotonic() < deadline and not self._stop_event.is_set():
+                time.sleep(0.05)
+                with self._lock:
+                    state = self._state
+                    error = self._last_error
+                if state is DeviceState.AUTHED:
+                    self.mark_active()
+                    return
+                if state is DeviceState.DISCONNECTED and error:
+                    break
+            if state is DeviceState.AUTHED:
+                self.mark_active()
+                return
+            if error:
+                raise RuntimeError(error)
+            raise RuntimeError("FK-01 重新连接超时，请稍候重试")
 
         if state is DeviceState.CONNECTING:
             raise RuntimeError("FK-01 正在连接中，请稍候重试")
@@ -213,9 +265,12 @@ class DeviceManager:
 
         Returns::
 
-            {"authed": bool, "version": str, "boot": 0|1, "rst": 0|1,
+            {"authed": bool, "idle": bool, "version": str, "boot": 0|1, "rst": 0|1,
              "v5v": 0|1, "v3v3": 0|1, "vusb": 0|1,
              "module": {"present": bool, "type": str|None, "fw": str|None}}
+
+        ``idle=True`` means the serial port was released by the idle timeout
+        (heartbeat paused); the next tool call reconnects automatically.
         """
         module = self.get_module_info()
         module_field = {
@@ -233,7 +288,9 @@ class DeviceManager:
 
         if not self.authed:
             return {
-                "authed": False, "version": "", "boot": 0,
+                "authed": False,
+                "idle": self._state is DeviceState.IDLE,
+                "version": "", "boot": 0,
                 "rst": 0, "v5v": 0, "v3v3": 0, "vusb": 0,
                 "module": module_field,
             }
@@ -241,16 +298,17 @@ class DeviceManager:
         fk = self._fk
         if fk is None:
             return {
-                "authed": False, "version": "", "boot": 0,
+                "authed": False, "idle": False, "version": "", "boot": 0,
                 "rst": 0, "v5v": 0, "v3v3": 0, "vusb": 0,
                 "module": module_field,
             }
 
         try:
+            self.mark_active()  # 状态查询是设备活动，重置空闲计时
             version = fk.commands.get_version()
             pin_status = fk.commands.get_status()
             return {
-                "authed": True,
+                "authed": True, "idle": False,
                 "version": version.get("version", ""),
                 "boot": pin_status.get("boot", 0),
                 "rst": pin_status.get("rst", 0),
@@ -262,7 +320,7 @@ class DeviceManager:
         except Exception as exc:
             logger.warning("get_status failed: %s", exc)
             return {
-                "authed": False, "version": "", "boot": 0,
+                "authed": False, "idle": False, "version": "", "boot": 0,
                 "rst": 0, "v5v": 0, "v3v3": 0, "vusb": 0,
                 "module": module_field,
             }
@@ -324,6 +382,8 @@ class DeviceManager:
                 self._do_handshake()
             elif state is DeviceState.AUTHED:
                 self._ping_keepalive()
+            elif state is DeviceState.IDLE:
+                self._wait_idle_wake()
             else:
                 time.sleep(0.1)
 
@@ -429,6 +489,7 @@ class DeviceManager:
                 with self._lock:
                     self._state = DeviceState.AUTHED
                     self._last_error = ""
+                self.mark_active()  # 握手完成视为一次活动：连接后有完整的空闲窗口
                 logger.info("Handshake succeeded — device authenticated")
                 # 处理握手期间到达的缓存事件（固件认证完成后补传按键事件）
                 self._drain_events()
@@ -441,8 +502,52 @@ class DeviceManager:
         self._transition_to_disconnected(ERR_HANDSHAKE_TIMEOUT)
 
     # ------------------------------------------------------------------
-    # AUTHED → PING keepalive
+    # AUTHED → PING keepalive / idle release
     # ------------------------------------------------------------------
+
+    def _check_idle_release(self) -> bool:
+        """Release the serial port if it has been idle long enough.
+
+        Called from the AUTHED keepalive loop.  Returns True if the port
+        was released (state moved to IDLE).  While a long operation
+        (flash/log) has keepalive paused, the port is never released.
+        """
+        if _IDLE_TIMEOUT_S <= 0:
+            return False
+        with self._lock:
+            if self._state is not DeviceState.AUTHED or self._fk is None:
+                return False
+            if self._pause_keepalive:
+                return False  # 长操作（烧录/日志采集）期间不释放
+            if time.monotonic() - self._last_activity < _IDLE_TIMEOUT_S:
+                return False
+        self._enter_idle()
+        return True
+
+    def _enter_idle(self) -> None:
+        """Close the FK-01 port and move to IDLE (heartbeat paused)."""
+        with self._lock:
+            if self._fk is not None:
+                try:
+                    self._fk.close()
+                except Exception:
+                    pass
+                self._fk = None
+            self._state = DeviceState.IDLE
+            self._last_error = ""
+        logger.info(
+            "No tool activity for %.0fs — FK-01 port released (idle). "
+            "Next tool call will reconnect and re-handshake.",
+            _IDLE_TIMEOUT_S,
+        )
+
+    def _wait_idle_wake(self) -> None:
+        """IDLE: port closed, wait for a tool call or shutdown."""
+        while not self._stop_event.is_set():
+            with self._lock:
+                if self._state is not DeviceState.IDLE:
+                    return
+            self._sleep_or_watch(0.5)
 
     def _ping_keepalive(self) -> None:
         """Send PING every 2 s.  After _PING_MAX_FAILS consecutive failures, disconnect."""
@@ -455,6 +560,10 @@ class DeviceManager:
 
             if state is not DeviceState.AUTHED or fk is None:
                 return  # state changed externally
+
+            # 空闲超时 → 释放串口（心跳随端口暂停，下次调用重新握手）
+            if self._check_idle_release():
+                return
 
             self._drain_events()
 

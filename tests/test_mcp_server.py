@@ -75,7 +75,7 @@ def _build_env() -> dict[str, str]:
 def start_server() -> subprocess.Popen:
     """Start the MCP server subprocess connected via stdin/stdout."""
     proc = subprocess.Popen(
-        [sys.executable, "-m", "flashkey_mcp.server"],
+        [sys.executable, "-m", "flashkey_mcp.server", "--stdio"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
