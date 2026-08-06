@@ -74,109 +74,6 @@ header "步骤 3/3: 配置 AI 工具"
 
 CONFIGURED=0
 
-# ── Claude Code ──────────────────────────────────────────────────────
-configure_claude_code() {
-    local config_file="$HOME/.claude/mcp.json"
-    local server_name="flashkey"
-
-    # 检查是否已配置
-    if [ -f "$config_file" ] && grep -q "\"$server_name\"" "$config_file" 2>/dev/null; then
-        info "Claude Code: 已配置 ($config_file)"
-        CONFIGURED=$((CONFIGURED + 1))
-        return
-    fi
-
-    # 确保目录存在
-    mkdir -p "$(dirname "$config_file")"
-
-    # 读取已有配置 (如果存在)
-    local new_config
-    if [ -f "$config_file" ]; then
-        new_config=$(python3 -c "
-import json, sys
-with open('$config_file') as f:
-    cfg = json.load(f)
-cfg.setdefault('mcpServers', {})['$server_name'] = {'type': 'sse', 'url': 'http://127.0.0.1:8100/sse'}
-with open('$config_file', 'w') as f:
-    json.dump(cfg, f, indent=2)
-    f.write('\n')
-print('ok')
-" 2>/dev/null)
-        if [ "$new_config" = "ok" ]; then
-            info "Claude Code: 已添加配置 (~/.claude/mcp.json)"
-            CONFIGURED=$((CONFIGURED + 1))
-        else
-            warn "Claude Code: 配置写入失败，请手动编辑 ~/.claude/mcp.json"
-        fi
-    else
-        cat > "$config_file" << 'MCPEOF'
-{
-  "mcpServers": {
-    "flashkey": {
-      "type": "sse",
-      "url": "http://127.0.0.1:8100/sse"
-    }
-  }
-}
-MCPEOF
-        info "Claude Code: 已创建配置 (~/.claude/mcp.json)"
-        CONFIGURED=$((CONFIGURED + 1))
-    fi
-
-    # 同时添加 MCP 工具免授权权限
-    local perm_file="$HOME/.claude/settings.json"
-    if [ -f "$perm_file" ]; then
-        python3 -c "
-import json
-with open('$perm_file') as f:
-    cfg = json.load(f)
-perms = cfg.setdefault('permissions', {}).setdefault('allow', [])
-if 'mcp__flashkey__*' not in perms:
-    perms.append('mcp__flashkey__*')
-with open('$perm_file', 'w') as f:
-    json.dump(cfg, f, indent=2)
-    f.write('\n')
-" 2>/dev/null && info "Claude Code: MCP 工具已免授权"
-    fi
-}
-
-# ── Claude Desktop ───────────────────────────────────────────────────
-configure_claude_desktop() {
-    local config_file
-    case "$(uname -s)" in
-        Darwin) config_file="$HOME/Library/Application Support/Claude/claude_desktop_config.json" ;;
-        Linux)  return ;;  # Claude Desktop 不常见于 Linux
-        *)      return ;;
-    esac
-
-    if [ ! -d "$(dirname "$config_file")" ]; then
-        return  # Claude Desktop 未安装
-    fi
-
-    if [ -f "$config_file" ] && grep -q '"flashkey"' "$config_file" 2>/dev/null; then
-        info "Claude Desktop: 已配置"
-        CONFIGURED=$((CONFIGURED + 1))
-        return
-    fi
-
-    mkdir -p "$(dirname "$config_file")"
-    if [ -f "$config_file" ]; then
-        python3 -c "
-import json, sys
-with open('$config_file') as f:
-    cfg = json.load(f)
-cfg.setdefault('mcpServers', {})['flashkey'] = {'type': 'sse', 'url': 'http://127.0.0.1:8100/sse'}
-with open('$config_file', 'w') as f:
-    json.dump(cfg, f, indent=2)
-    f.write('\n')
-" 2>/dev/null && info "Claude Desktop: 已添加配置" && CONFIGURED=$((CONFIGURED + 1))
-    else
-        printf '{\n  "mcpServers": {\n    "flashkey": {\n      "type": "sse",\n      "url": "http://127.0.0.1:8100/sse"\n    }\n  }\n}\n' > "$config_file"
-        info "Claude Desktop: 已创建配置"
-        CONFIGURED=$((CONFIGURED + 1))
-    fi
-}
-
 # ── Cline (VS Code) ──────────────────────────────────────────────────
 configure_cline() {
     local config_file="$HOME/.cline/mcp.json"
@@ -257,8 +154,6 @@ configure_mimo() {
 }
 
 # ── 检测并配置 ────────────────────────────────────────────────────────
-configure_claude_code
-configure_claude_desktop
 configure_cline
 configure_hermes
 configure_mimo

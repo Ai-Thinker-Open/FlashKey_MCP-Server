@@ -9,7 +9,7 @@
 
 ## Introduction
 
-FlashKey FK-01 is a dual-chip USB flashing and debugging adapter from Ai-Thinker. **flashkey-mcp** is its MCP (Model Context Protocol) server plugin that lets AI tools such as Claude Code, Claude Desktop, Cline, Hermes Agent, and MiMo Code control the FK-01 directly for flashing, log collection, and debugging:
+FlashKey FK-01 is a dual-chip USB flashing and debugging adapter from Ai-Thinker. **flashkey-mcp** is its MCP (Model Context Protocol) server plugin that lets AI tools such as Cline, Hermes Agent, and MiMo Code control the FK-01 directly for flashing, log collection, and debugging:
 
 - ⚡ One-click firmware flashing for BL602 / BL616 / BL618
 - 📋 Collect target chip serial logs
@@ -35,7 +35,7 @@ The script will:
 2. Detect AI tools on your system and write the matching MCP configuration automatically
 3. Show you the next steps
 
-**Tools supported by automatic configuration**: Claude Code, Claude Desktop, Cline, Hermes Agent, MiMo Code
+**Tools supported by automatic configuration**: Cline, Hermes Agent, MiMo Code
 
 ### Install via pip (from Git)
 
@@ -87,7 +87,7 @@ flashkey-mcp --sse --host 127.0.0.1 --port 8100
 Every tool's MCP config is essentially the same: connect to the SSE endpoint
 above instead of launching a subprocess.
 
-#### JSON format (Claude Code / Claude Desktop / Cline / VS Code)
+#### JSON format (Cline / VS Code)
 
 Add the following to your tool's MCP config file:
 
@@ -104,9 +104,6 @@ Add the following to your tool's MCP config file:
 
 | Tool | Config file path |
 |------|------------------|
-| Claude Code | `~/.claude/mcp.json` |
-| Claude Desktop macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Cline (VS Code) | `~/.cline/mcp.json` |
 
 #### YAML format (Hermes Agent)
@@ -155,7 +152,7 @@ codex mcp add flashkey-mcp --url http://127.0.0.1:8100/mcp
 
 ### Multiple AI sessions / clients sharing one FK-01
 
-Any number of sessions on the same machine (Claude, Cursor, Codex, …) simply
+Any number of sessions on the same machine (Cursor, Codex, …) simply
 use the same URL. The device is held by the single daemon, so sessions never
 interfere with each other:
 

@@ -9,7 +9,7 @@
 
 ## 项目简介
 
-FlashKey FK-01 是安信可（Ai-Thinker）推出的双芯片 USB 烧录调试器。**flashkey-mcp** 是它的 MCP（Model Context Protocol）服务器插件，让 Claude Code、Claude Desktop、Cline、Hermes Agent、MiMo Code 等 AI 工具可以直接控制 FK-01 完成烧录、日志采集与调试：
+FlashKey FK-01 是安信可（Ai-Thinker）推出的双芯片 USB 烧录调试器。**flashkey-mcp** 是它的 MCP（Model Context Protocol）服务器插件，让 Cline、Hermes Agent、MiMo Code 等 AI 工具可以直接控制 FK-01 完成烧录、日志采集与调试：
 
 - ⚡ 一键烧录 BL602 / BL616 / BL618 固件
 - 📋 采集目标芯片串口日志
@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/Ai-Thinker-Open/FlashKey_MCP-Server
 2. 检测系统上的 AI 工具，自动写入对应格式的 MCP 配置
 3. 提示下一步操作
 
-**支持自动配置的工具**：Claude Code、Claude Desktop、Cline、Hermes Agent、MiMo Code
+**支持自动配置的工具**：Cline、Hermes Agent、MiMo Code
 
 ### pip 安装（Git 源）
 
@@ -80,7 +80,7 @@ flashkey-mcp --sse --host 127.0.0.1 --port 8100
 
 所有工具的 MCP 配置本质相同：让工具连接上述 SSE 端点，而不是启动一个子进程。
 
-#### JSON 格式（Claude Code / Claude Desktop / Cline / VS Code）
+#### JSON 格式（Cline / VS Code）
 
 在工具的 MCP 配置文件中添加：
 
@@ -97,9 +97,6 @@ flashkey-mcp --sse --host 127.0.0.1 --port 8100
 
 | 工具 | 配置文件路径 |
 |------|-------------|
-| Claude Code | `~/.claude/mcp.json` |
-| Claude Desktop macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Cline (VS Code) | `~/.cline/mcp.json` |
 
 #### YAML 格式（Hermes Agent）
@@ -148,7 +145,7 @@ codex mcp add flashkey-mcp --url http://127.0.0.1:8100/mcp
 
 ### 多个 AI 会话 / 多个客户端共享
 
-同一台机器上的任意数量会话（Claude、Cursor、Codex…）都使用同一个 URL 即可。设备只被唯一的常驻进程持有，会话之间互不干扰：
+同一台机器上的任意数量会话（Cursor、Codex…）都使用同一个 URL 即可。设备只被唯一的常驻进程持有，会话之间互不干扰：
 
 - Linux：服务崩溃会自动重启，无需干预。
 - Windows / macOS：保持常驻进程运行；日志可 `tail -f /tmp/flashkey-mcp.log` 查看。

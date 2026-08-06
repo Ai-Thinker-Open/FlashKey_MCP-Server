@@ -123,7 +123,7 @@ pip install --user git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.gi
 bash setup.sh
 ```
 
-自动检测系统上的 AI 工具并写入对应配置。支持 Claude Code、Claude Desktop、Cline、Hermes、MiMo Code。
+自动检测系统上的 AI 工具并写入对应配置。支持 Cline、Hermes、MiMo Code。
 
 ### 方式 B：手动配置
 
@@ -137,8 +137,6 @@ flashkey-mcp 是通用 MCP 服务器，任何 MCP 兼容工具都可以使用。
 
 | 工具 | 配置文件 | 格式 |
 |------|---------|------|
-| Claude Code | `~/.claude/mcp.json` | JSON |
-| Claude Desktop | macOS: `~/Library/Application Support/Claude/claude_desktop_config.json` | JSON |
 | Cline (VS Code) | `~/.cline/mcp.json` | JSON |
 | Hermes Agent | `~/.hermes/config.yaml` | YAML |
 | MiMo Code | 项目根目录 `mimocode.json`，顶层 key 为 `"mcp"`，`"type": "local"` | JSON |
