@@ -49,11 +49,11 @@ pip install git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git
 pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git"
 ```
 
-### 从源码编译 / 安装（开发者）
+### 从源码安装（开发者）
 
 ```bash
 git clone git@github.com:Ai-Thinker-Open/FlashKey_MCP-Server.git
-cd flashkey-mcp
+cd FlashKey_MCP-Server
 pip install -e .
 ```
 
@@ -146,7 +146,7 @@ flashkey_status()
 flashkey_status()
 ```
 
-返回 FK-01 是否在线、固件版本、可用串口等信息。
+返回 FK-01 的认证状态、固件版本、引脚状态与扩展模块信息。
 
 ### 示例 2：一键烧录固件
 
@@ -191,7 +191,7 @@ flashkey_ping() / flashkey_get_version() / flashkey_get_uid()
 
 ## FK-01 自身固件升级（CH32V203）
 
-`flashkey_firmware_check()` 比较设备当前固件版本、当前安装包内置固件版本与 GitHub 最新 Release 固件版本；`flashkey_firmware_flash()` 通过 WCH-LinkE（SDI）烧录 CH32V203（默认烧包内内置 hex，也可传 `hex_path`）。
+`flashkey_firmware_check()` 检查设备当前固件版本、安装包内置固件版本与已安装插件版本，并与 GitHub 最新 Release 对比；`flashkey_firmware_flash()` 通过 WCH-LinkE（SDI）烧录 CH32V203（默认烧包内内置 hex，也可传 `hex_path`）。
 
 ⚠️ 烧录前置条件：把 FlashKey 自带的 WCH-LinkE 通过 USB 接入电脑，并将 SWDIO/SWCLK/GND/3V3 接到 CH32V203 的 SWD 接口且目标板上电；WSL 环境需先 `usbip attach`。烧录需要显式传 `confirm=True`；普通烧录失败且疑似读保护/写保护时，工具会自动用带 unlock 的全片擦除+烧录重试一次，仍失败会提示用 Windows 主机的 **WCH-LinkUtility** 手动解锁。
 

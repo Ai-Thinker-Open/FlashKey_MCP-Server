@@ -49,11 +49,11 @@ For SSE support:
 pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git"
 ```
 
-### Build / install from source (developers)
+### Install from source (developers)
 
 ```bash
 git clone git@github.com:Ai-Thinker-Open/FlashKey_MCP-Server.git
-cd flashkey-mcp
+cd FlashKey_MCP-Server
 pip install -e .
 ```
 
@@ -146,7 +146,7 @@ Call this in your AI tool's conversation:
 flashkey_status()
 ```
 
-Returns whether the FK-01 is online, its firmware version, and available serial ports.
+Returns the FK-01's authentication status, firmware version, pin states, and module info.
 
 ### Example 2: Flash firmware in one click
 
@@ -191,7 +191,7 @@ Automatic handshake within 5 seconds after plugging in the FK-01.
 
 ## Upgrading FK-01 firmware (CH32V203)
 
-`flashkey_firmware_check()` compares the device's current firmware version, the firmware bundled with the installed package, and the latest firmware release on GitHub; `flashkey_firmware_flash()` flashes the CH32V203 via WCH-LinkE (SDI), using the bundled hex by default (a custom `hex_path` is also supported).
+`flashkey_firmware_check()` checks the device's current firmware version, the firmware bundled with the installed package, and the installed plugin version, comparing them with the latest GitHub release; `flashkey_firmware_flash()` flashes the CH32V203 via WCH-LinkE (SDI), using the bundled hex by default (a custom `hex_path` is also supported).
 
 ⚠️ Prerequisites: connect the FlashKey's built-in WCH-LinkE to your computer via USB and wire SWDIO/SWCLK/GND/3V3 to the CH32V203's SWD interface with the target powered on; in WSL you need `usbip attach` first. Flashing requires an explicit `confirm=True`. If a normal flash fails with a suspected read/write protection error, the tool automatically retries with an unlocked full-chip erase + flash; if it still fails, it will suggest manually unlocking with **WCH-LinkUtility** on a Windows host.
 
