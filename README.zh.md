@@ -53,6 +53,18 @@ cd FlashKey_MCP-Server
 pip install -e .
 ```
 
+### 国内网络/镜像
+
+GitHub 不可达时，安装源和固件更新源都可以通过环境变量切换：
+
+```bash
+# 用 Gitee 镜像安装（Gitee 会自动从 GitHub 源仓库同步）
+FLASHKEY_INSTALL_URL="flashkey-mcp[sse] @ git+https://gitee.com/Ai-Thinker-Open/FlashKey_MCP-Server.git" bash setup.sh
+
+# firmware_check 更新源：auto（默认，先 GitHub 后 Gitee）/ github / gitee
+FLASHKEY_UPDATE_SOURCE=gitee flashkey-mcp
+```
+
 ---
 
 ## 使用说明

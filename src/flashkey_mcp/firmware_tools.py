@@ -35,10 +35,20 @@ logger = logging.getLogger(__name__)
 # ── Update source (GitHub) ───────────────────────────────────────────
 
 GITHUB_REPO = "Ai-Thinker-Open/FlashKey_MCP-Server"
+GITEE_REPO = "Ai-Thinker-Open/FlashKey_MCP-Server"
 RELEASES_LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RAW_FIRMWARE_JSON_URL = (
     "https://raw.githubusercontent.com/{repo}/{tag}/src/flashkey_mcp/firmware/firmware.json"
 )
+GITEE_RELEASES_LATEST_URL = f"https://gitee.com/api/v5/repos/{GITEE_REPO}/releases/latest"
+GITEE_RAW_FIRMWARE_JSON_URL = (
+    "https://gitee.com/{repo}/raw/{tag}/src/flashkey_mcp/firmware/firmware.json"
+)
+
+# ── Update source selection ───────────────────────────────────────────
+# ``FLASHKEY_UPDATE_SOURCE=auto`` (default) tries GitHub first, then Gitee;
+# ``=github`` / ``=gitee`` pins a single source (useful behind firewalls).
+UPDATE_SOURCE_ENV = "FLASHKEY_UPDATE_SOURCE"
 
 # ── Tuning ────────────────────────────────────────────────────────────
 
@@ -428,14 +438,48 @@ def fetch_json(url: str, timeout: int = NETWORK_TIMEOUT_S) -> dict | None:
 
 
 def fetch_latest_release(timeout: int = NETWORK_TIMEOUT_S) -> dict | None:
-    """GitHub ``releases/latest`` for the flashkey-mcp repo."""
-    return fetch_json(RELEASES_LATEST_URL, timeout=timeout)
+    """``releases/latest`` for the flashkey-mcp repo (GitHub → Gitee fallback)."""
+    for url in _release_latest_urls():
+        data = fetch_json(url, timeout=timeout)
+        if data:
+            return data
+    return None
 
 
 def fetch_manifest_at_tag(tag: str, timeout: int = NETWORK_TIMEOUT_S) -> dict | None:
     """Fetch the ``firmware.json`` bundled at a specific release tag."""
-    url = RAW_FIRMWARE_JSON_URL.format(repo=GITHUB_REPO, tag=tag)
-    return fetch_json(url, timeout=timeout)
+    for url in _manifest_urls(tag):
+        data = fetch_json(url, timeout=timeout)
+        if data:
+            return data
+    return None
+
+
+def _update_sources() -> list[str]:
+    """Return the ordered update sources from ``FLASHKEY_UPDATE_SOURCE``."""
+    env = os.environ.get(UPDATE_SOURCE_ENV, "").strip().lower()
+    if env == "github":
+        return ["github"]
+    if env == "gitee":
+        return ["gitee"]
+    return ["github", "gitee"]  # auto: GitHub first, Gitee fallback
+
+
+def _release_latest_urls() -> list[str]:
+    urls: list[str] = []
+    for src in _update_sources():
+        urls.append(RELEASES_LATEST_URL if src == "github" else GITEE_RELEASES_LATEST_URL)
+    return urls
+
+
+def _manifest_urls(tag: str) -> list[str]:
+    urls: list[str] = []
+    for src in _update_sources():
+        if src == "github":
+            urls.append(RAW_FIRMWARE_JSON_URL.format(repo=GITHUB_REPO, tag=tag))
+        else:
+            urls.append(GITEE_RAW_FIRMWARE_JSON_URL.format(repo=GITEE_REPO, tag=tag))
+    return urls
 
 
 def check_firmware_update(

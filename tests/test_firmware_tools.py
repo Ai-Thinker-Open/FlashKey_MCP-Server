@@ -64,6 +64,60 @@ def test_resolve_openocd_missing_env_falls_back(tmp_path, monkeypatch):
 
 # ── Update check ──────────────────────────────────────────────────────
 
+def test_fetch_latest_release_falls_back_to_gitee(monkeypatch):
+    calls: list[str] = []
+
+    def fake_fetch(url, timeout=firmware_tools.NETWORK_TIMEOUT_S):
+        calls.append(url)
+        if "api.github.com" in url:
+            return None
+        return {"tag_name": "v0.1.2", "html_url": "https://gitee.com/x/y/releases/v0.1.2"}
+
+    monkeypatch.setattr(firmware_tools, "fetch_json", fake_fetch)
+    data = firmware_tools.fetch_latest_release()
+    assert data and data["tag_name"] == "v0.1.2"
+    assert len(calls) == 2
+    assert calls[0] == firmware_tools.RELEASES_LATEST_URL
+    assert calls[1] == firmware_tools.GITEE_RELEASES_LATEST_URL
+
+
+def test_fetch_latest_release_gitee_only(monkeypatch):
+    monkeypatch.setenv(firmware_tools.UPDATE_SOURCE_ENV, "gitee")
+    calls: list[str] = []
+
+    def fake_fetch(url, timeout=firmware_tools.NETWORK_TIMEOUT_S):
+        calls.append(url)
+        return {"tag_name": "v0.1.2"} if "gitee.com" in url else None
+
+    monkeypatch.setattr(firmware_tools, "fetch_json", fake_fetch)
+    assert firmware_tools.fetch_latest_release()["tag_name"] == "v0.1.2"
+    assert len(calls) == 1
+    assert calls[0] == firmware_tools.GITEE_RELEASES_LATEST_URL
+
+
+def test_fetch_manifest_at_tag_falls_back(monkeypatch):
+    calls: list[str] = []
+
+    def fake_fetch(url, timeout=firmware_tools.NETWORK_TIMEOUT_S):
+        calls.append(url)
+        if "raw.githubusercontent.com" in url:
+            return None
+        return {"version": "0.1.2"}
+
+    monkeypatch.setattr(firmware_tools, "fetch_json", fake_fetch)
+    data = firmware_tools.fetch_manifest_at_tag("v0.1.2")
+    assert data and data["version"] == "0.1.2"
+    assert "gitee.com" in calls[1]
+
+
+def test_fetch_all_sources_fail(monkeypatch):
+    monkeypatch.setattr(
+        firmware_tools, "fetch_json", lambda url, timeout=firmware_tools.NETWORK_TIMEOUT_S: None
+    )
+    assert firmware_tools.fetch_latest_release() is None
+    assert firmware_tools.fetch_manifest_at_tag("v0.1.2") is None
+
+
 def test_check_firmware_update_offline_device(monkeypatch):
     monkeypatch.setattr(firmware_tools, "fetch_latest_release", lambda **kw: None)
     result = firmware_tools.check_firmware_update(device_version=None)

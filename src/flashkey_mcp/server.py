@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -1227,21 +1228,24 @@ mcp.add_tool(
 # ======================================================================
 
 def _handle_upgrade() -> None:
-    """Upgrade flashkey-mcp to latest version from GitHub."""
+    """Upgrade flashkey-mcp; install source overridable via FLASHKEY_INSTALL_URL."""
     from flashkey_mcp import __version__
 
+    install_url = os.environ.get(
+        "FLASHKEY_INSTALL_URL",
+        "git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git",
+    )
     print(f"Current version: {__version__}")
-    print("Upgrading from GitHub...")
+    print(f"Upgrading from {install_url} ...")
     result = subprocess.run(
         [
-            sys.executable, "-m", "pip", "install", "--upgrade",
-            "git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git",
+            sys.executable, "-m", "pip", "install", "--upgrade", install_url,
         ],
         capture_output=False,
     )
     if result.returncode != 0:
         print("Upgrade failed. Try manually:")
-        print("  pip install --upgrade git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git")
+        print(f'  pip install --upgrade "{install_url}"')
         sys.exit(1)
 
     print("Upgrade complete. Restarting service...")

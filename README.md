@@ -55,6 +55,19 @@ cd FlashKey_MCP-Server
 pip install -e .
 ```
 
+### China network / mirrors (国内网络/镜像)
+
+If GitHub is unreachable, both the install source and the firmware-update
+source can be switched via environment variables:
+
+```bash
+# Install via the Gitee mirror (Gitee auto-syncs from the GitHub source repo)
+FLASHKEY_INSTALL_URL="flashkey-mcp[sse] @ git+https://gitee.com/Ai-Thinker-Open/FlashKey_MCP-Server.git" bash setup.sh
+
+# firmware_check update source: auto (default, GitHub first then Gitee) / github / gitee
+FLASHKEY_UPDATE_SOURCE=gitee flashkey-mcp
+```
+
 ---
 
 ## Usage

@@ -14,19 +14,56 @@ header(){ echo -e "\n${BOLD}═══ $* ═══${NC}"; }
 # ─── 步骤 1: 安装 flashkey-mcp ────────────────────────────────────────
 header "步骤 1/3: 安装 flashkey-mcp"
 
+# 安装源可用环境变量覆盖（国内可换成 Gitee 镜像或 PyPI 包名）：
+#   FLASHKEY_INSTALL_URL="flashkey-mcp[sse] @ git+https://gitee.com/Ai-Thinker-Open/FlashKey_MCP-Server.git"
+INSTALL_URL="${FLASHKEY_INSTALL_URL:-flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git}"
+
+# ── 预检: Python >= 3.10 ──────────────────────────────────────────────
+PYTHON_BIN=""
+for cand in python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+        PYTHON_BIN="$cand"
+        break
+    fi
+done
+if [ -z "$PYTHON_BIN" ]; then
+    err "未找到 Python >= 3.10，请先安装后重试："
+    err "  Ubuntu/Debian: sudo apt install python3.12 python3.12-venv"
+    err "  macOS:         brew install python@3.12"
+    err "  Windows:       winget install Python.Python.3.12"
+    exit 1
+fi
+info "Python: $($PYTHON_BIN --version 2>&1 | head -1)"
+
+# ── PEP 668 预检（Ubuntu 23.04+ 等系统 Python 默认拒绝全局 pip）────────
+if "$PYTHON_BIN" -c 'import sysconfig, os; sys.exit(0 if os.path.exists(os.path.join(sysconfig.get_path("stdlib"), "EXTERNALLY-MANAGED")) else 1)' 2>/dev/null; then
+    warn "系统 Python 受 PEP 668 (externally-managed) 保护，pip 全局安装可能被拒绝；脚本会尝试 venv/uv 兜底"
+fi
+
 if command -v flashkey-mcp &>/dev/null; then
     info "flashkey-mcp 已安装: $(flashkey-mcp --version 2>&1 | head -1)"
 else
     echo "正在安装 flashkey-mcp..."
-    if pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git" 2>/dev/null; then
+    if "$PYTHON_BIN" -m pip install "$INSTALL_URL" 2>/dev/null; then
         info "安装成功"
-    elif pip install --user "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git" 2>/dev/null; then
+    elif "$PYTHON_BIN" -m pip install --user "$INSTALL_URL" 2>/dev/null; then
         info "安装成功 (--user)"
-    elif python3 -m pip install "flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git" 2>/dev/null; then
-        info "安装成功 (python3 -m pip)"
+    elif command -v uv >/dev/null 2>&1 && uv tool install --reinstall "$INSTALL_URL" 2>/dev/null; then
+        info "安装成功 (uv tool)"
     else
-        err "安装失败，请手动执行: pip install \"flashkey-mcp[sse] @ git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.git\""
-        exit 1
+        # 最后兜底: 专用 venv
+        VENV_DIR="${FLASHKEY_VENV_DIR:-$HOME/.local/share/flashkey-mcp-venv}"
+        if "$PYTHON_BIN" -m venv "$VENV_DIR" 2>/dev/null \
+            && "$VENV_DIR/bin/python" -m pip install "$INSTALL_URL" 2>/dev/null \
+            && [ -x "$VENV_DIR/bin/flashkey-mcp" ]; then
+            mkdir -p "$HOME/.local/bin"
+            ln -sf "$VENV_DIR/bin/flashkey-mcp" "$HOME/.local/bin/flashkey-mcp"
+            info "安装成功 (venv: $VENV_DIR)"
+        else
+            err "安装失败。请手动执行: $PYTHON_BIN -m pip install \"$INSTALL_URL\""
+            err "提示: 若系统 Python 受 PEP 668 保护，请改用 uv tool install \"$INSTALL_URL\"，或先创建 venv"
+            exit 1
+        fi
     fi
 
     # 确保 flashkey-mcp 在 PATH 中
@@ -38,6 +75,12 @@ else
             info "已链接到 ~/.local/bin/flashkey-mcp"
         fi
     fi
+fi
+
+# ── WSL 提示 ──────────────────────────────────────────────────────────
+if [ -n "${WSL_DISTRO_NAME:-}" ] || uname -r 2>/dev/null | grep -qi microsoft; then
+    warn "检测到 WSL：FK-01 需先附加进 WSL 才能使用（Windows 端 usbipd 附加 → usbip attach），"
+    warn "之后调用 flashkey_list_ports() 确认端口。详见 README FAQ。"
 fi
 
 # ─── 步骤 2: 启动 SSE 常驻服务 ───────────────────────────────────────
