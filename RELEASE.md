@@ -23,7 +23,7 @@
 1. 打 tag：`git tag v<包版本>`（如 `v0.1.0`），然后 `git push origin master --tags`。
 2. 在 GitHub 创建 Release：选择刚打的 tag，正文写变更日志（建议包含固件更新内容）。
 3. 发布后 `flashkey_firmware_check` 即可读到新版本
-   （`releases/latest` + `raw.githubusercontent.com/<tag>/flashkey_mcp/firmware/firmware.json`）。
+   （`releases/latest` + `raw.githubusercontent.com/<tag>/src/flashkey_mcp/firmware/firmware.json`）。
 
 ## 注意
 

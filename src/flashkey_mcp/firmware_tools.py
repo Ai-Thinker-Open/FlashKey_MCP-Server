@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 GITHUB_REPO = "Ai-Thinker-Open/FlashKey_MCP-Server"
 RELEASES_LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RAW_FIRMWARE_JSON_URL = (
-    "https://raw.githubusercontent.com/{repo}/{tag}/flashkey_mcp/firmware/firmware.json"
+    "https://raw.githubusercontent.com/{repo}/{tag}/src/flashkey_mcp/firmware/firmware.json"
 )
 
 # ── Tuning ────────────────────────────────────────────────────────────
