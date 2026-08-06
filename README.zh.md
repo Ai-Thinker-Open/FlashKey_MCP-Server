@@ -2,7 +2,6 @@
 
 > FlashKey FK-01 MCP 服务器 — 通用 USB 烧录调试器，支持任何 MCP 兼容的 AI 工具。
 
-[![简体中文](https://img.shields.io/badge/简体中文-中文文档-brightgreen)](README.zh.md)
 [![English](https://img.shields.io/badge/English-README-blue)](README.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
