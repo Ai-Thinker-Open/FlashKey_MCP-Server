@@ -11,7 +11,7 @@
 
 FlashKey FK-01 是安信可（Ai-Thinker）推出的双芯片 USB 烧录调试器。**flashkey-mcp** 是它的 MCP（Model Context Protocol）服务器插件，让 Cline、Hermes Agent、MiMo Code 等 AI 工具可以直接控制 FK-01 完成烧录、日志采集与调试：
 
-- ⚡ 一键烧录 BL602 / BL616 / BL618 固件
+- ⚡ 一键烧录 Ai-WB2 / Ai-M62 固件
 - 📋 采集目标芯片串口日志
 - 🔘 控制 BOOT / RST 引脚与 5V / 3.3V / VUSB 电源
 - 🔄 升级 FK-01 自身 CH32V203 固件（OpenOCD + WCH-LinkE）
@@ -205,7 +205,7 @@ flashkey_status()
 ### 示例 2：一键烧录固件
 
 ```
-flashkey_flash(firmware_path="/path/to/firmware.bin", chip="bl602", flash_port="ttyACM1")
+flashkey_flash(firmware_path="/path/to/firmware.bin", chip="ai-wb2", flash_port="ttyACM1")
 ```
 
 > ⚠️ 端口选择：先调用 `flashkey_list_ports()` 查看端口列表，选择 `role=fk_log` 的端口；**不能**使用 `role=fk_control` 的端口（那是 FK-01 主控口，MCP 内部专用）。
@@ -220,13 +220,14 @@ flashkey_log(port="ttyACM1", baud_rate=115200, duration=5, grep="ERROR")
 
 ## 工作原理
 
-FlashKey FK-01 是双芯片 USB 烧录调试器。MCP 插件提供 27 个工具：
+FlashKey FK-01 是双芯片 USB 烧录调试器。MCP 插件提供 28 个工具：
 
 ```
 flashkey_status()          ← 统一状态，无需认证
 flashkey_list_ports()      ← 列出所有串口
+flashkey_recover()         ← 一站式恢复（USB 重挂载 + 重新握手）
 
-flashkey_flash()           ← 一键烧录 BL602/BL616/BL618
+flashkey_flash()           ← 一键烧录 Ai-WB2/Ai-M62
 flashkey_log()             ← 采集目标芯片日志
 flashkey_firmware_check()  ← 检查 FK-01 自身固件是否有更新
 flashkey_firmware_flash()  ← 烧录 FK-01 自身 CH32V203 固件（OpenOCD + WCH-LinkE）
@@ -240,6 +241,41 @@ flashkey_ping() / flashkey_get_version() / flashkey_get_uid()
 ```
 
 插入 FK-01 后自动握手，5 秒内完成。
+
+---
+
+## MCP Resources & Prompts
+
+MCP 服务通过 **resources** 提供权威参考数据，通过 **prompts** 提供正确的调用流程模板。
+支持 resources/prompts 的客户端可直接读取；不支持的客户端仍会收到注入的浓缩指引和工具描述。
+
+### Resources
+
+| URI | 内容 |
+| --- | --- |
+| `flashkey://docs/quickstart` | 上手流程：查状态 → 选端口 → 认证 → 烧录/日志 |
+| `flashkey://docs/flash-guide` | 烧录指南：端口角色、chip 默认模式/波特率、烧后验证 |
+| `flashkey://docs/error-codes` | 错误码权威表（与 README 错误码表同源） |
+| `flashkey://status` | 实时设备状态（动态 JSON，离线时含 `error` 字段） |
+| `flashkey://ports` | 实时串口列表，含 `role` 字段（动态 JSON） |
+
+### Prompts
+
+| Prompt | 用途 |
+| --- | --- |
+| `flash-firmware` | 生成烧录步骤：选 `fk_log` → 认证 → 按 chip 默认参数烧录 → 验证 |
+| `recover-device` | 根据错误码输出恢复决策树 |
+| `collect-logs` | 生成日志采集步骤 |
+
+### Ai-WB2 / Ai-M62 正确用法摘要
+
+- 先 `flashkey_list_ports()`，选择 `role=fk_log`（WCH-LinkE VCP）的端口，
+  **绝不**使用 `role=fk_control`，也不要按端口名猜测。
+- `chip="ai-wb2"` 默认 **break** / `baud_rate=921600`（`make flash`）：串口打断烧录，
+  只烧 App、不烧 boot2；固件不支持串口打断或执行过 `make erase_flash` 时，
+  改用 `mode="isp"` + `make eflash`（全量含 boot2，BOOT↑ + RST 进入 ISP）。
+- `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=2000000`。
+- 烧录后必须验证：`flashkey_log()` 观察启动日志，或 AT 模组发送 `AT+GMR`。
 
 ---
 

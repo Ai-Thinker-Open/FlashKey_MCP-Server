@@ -15,6 +15,7 @@ import sys
 import tempfile
 import textwrap
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ── Path setup ──────────────────────────────────────────────────────────
@@ -151,6 +152,36 @@ def test_bl616_default_mode_is_isp():
     print("  test_bl616_default_mode_is_isp ✅")
 
 
+# ── Test 5b: BL602 ISP resolves make eflash ─────────────────────────────
+
+def test_bl602_isp_resolves_make_eflash():
+    """BL602 mode=isp should resolve to `make eflash`, not `make flash`."""
+    from flashkey_mcp.server import _resolve_flash_tool
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        (Path(tmpdir) / "Makefile").write_text(
+            "flash:\n\techo flash\neflash:\n\techo eflash\n"
+        )
+        with patch(
+            "flashkey_mcp.server.subprocess.run",
+            return_value=MagicMock(returncode=0),
+        ):
+            cmd = _resolve_flash_tool(
+                "bl602",
+                "",
+                tmpdir,
+                "/dev/ttyUSB0",
+                921600,
+                Path("/tmp/fw.bin"),
+                mode="isp",
+            )
+
+    assert cmd[:4] == ["make", "-C", tmpdir, "eflash"]
+    assert "p=/dev/ttyUSB0" in cmd
+    assert "b=921600" in cmd
+    print("  test_bl602_isp_resolves_make_eflash ✅")
+
+
 # ── Test 6: _tool_flash validates mode parameter ────────────────────────
 
 def test_tool_flash_rejects_invalid_mode():
@@ -207,6 +238,7 @@ def run_all():
     tests = [
         ("BL602 default = break", test_bl602_default_mode_is_break),
         ("BL616/BL618 default = isp", test_bl616_default_mode_is_isp),
+        ("BL602 ISP resolves make eflash", test_bl602_isp_resolves_make_eflash),
         ("Mode validation", test_tool_flash_rejects_invalid_mode),
         ("Break mode: normal flow", test_break_mode_detects_prompt_and_pulses_rst),
         ("Break mode: Chinese prompt", test_break_mode_detects_chinese_prompt),

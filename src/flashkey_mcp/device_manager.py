@@ -333,6 +333,42 @@ class DeviceManager:
         """Attach the dynamic-tool module registry (wired by the server)."""
         self._module_registry = registry
 
+    def recover(self, wait_s: float = 15.0) -> dict:
+        """Force a full re-detection + handshake cycle (one-stop recovery).
+
+        Safe to call whenever a tool failed with DEVICE_NOT_FOUND /
+        HANDSHAKE_FAILED / PORT_BUSY: closes any stale handle, resets the
+        monitor state, wakes the background thread and waits for the
+        device to come back AUTHED.
+        """
+        with self._lock:
+            had_handle = self._fk is not None
+            if had_handle:
+                self._close_device()
+            self._state = DeviceState.DISCONNECTED
+            self._last_error = ""
+        self._wake_monitor()
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline and not self._stop_event.is_set():
+            time.sleep(0.1)
+            with self._lock:
+                state = self._state
+                err = self._last_error
+            if state is DeviceState.AUTHED:
+                return {"connected": True, "authed": True, "error": ""}
+            if state is DeviceState.DISCONNECTED and err:
+                break
+        with self._lock:
+            state = self._state
+            err = self._last_error
+        if state is DeviceState.AUTHED:
+            return {"connected": True, "authed": True, "error": ""}
+        return {
+            "connected": state in (DeviceState.CONNECTING, DeviceState.AUTHED),
+            "authed": state is DeviceState.AUTHED,
+            "error": err or "恢复超时，设备未就绪",
+        }
+
     def get_module_info(self) -> dict:
         """Return cached module info from the registry (no IO)."""
         if self._module_registry is None:

@@ -11,7 +11,7 @@
 
 FlashKey FK-01 is a dual-chip USB flashing and debugging adapter from Ai-Thinker. **flashkey-mcp** is its MCP (Model Context Protocol) server plugin that lets AI tools such as Cline, Hermes Agent, and MiMo Code control the FK-01 directly for flashing, log collection, and debugging:
 
-- ⚡ One-click firmware flashing for BL602 / BL616 / BL618
+- ⚡ One-click firmware flashing for Ai-WB2 / Ai-M62
 - 📋 Collect target chip serial logs
 - 🔘 Control BOOT / RST pins and 5V / 3.3V / VUSB power
 - 🔄 Upgrade FK-01's own CH32V203 firmware (OpenOCD + WCH-LinkE)
@@ -222,7 +222,7 @@ Returns the FK-01's authentication status, firmware version, pin states, and mod
 ### Example 2: Flash firmware in one click
 
 ```
-flashkey_flash(firmware_path="/path/to/firmware.bin", chip="bl602", flash_port="ttyACM1")
+flashkey_flash(firmware_path="/path/to/firmware.bin", chip="ai-wb2", flash_port="ttyACM1")
 ```
 
 > ⚠️ Port selection: first call `flashkey_list_ports()` to list the ports and pick the one with `role=fk_log`; **do not** use the `role=fk_control` port (that is the FK-01 control port, reserved for the MCP server).
@@ -237,13 +237,14 @@ flashkey_log(port="ttyACM1", baud_rate=115200, duration=5, grep="ERROR")
 
 ## How it works
 
-FlashKey FK-01 is a dual-chip USB flashing and debugging adapter. The MCP plugin exposes 27 tools:
+FlashKey FK-01 is a dual-chip USB flashing and debugging adapter. The MCP plugin exposes 28 tools:
 
 ```
 flashkey_status()          ← unified status, no authentication required
 flashkey_list_ports()      ← list all serial ports
+flashkey_recover()         ← one-stop recovery (USB re-attach + re-handshake)
 
-flashkey_flash()           ← one-click flashing for BL602/BL616/BL618
+flashkey_flash()           ← one-click flashing for Ai-WB2/Ai-M62
 flashkey_log()             ← collect target chip logs
 flashkey_firmware_check()  ← check for FK-01 firmware updates
 flashkey_firmware_flash()  ← flash FK-01's own CH32V203 firmware (OpenOCD + WCH-LinkE)
@@ -257,6 +258,43 @@ flashkey_ping() / flashkey_get_version() / flashkey_get_uid()
 ```
 
 Automatic handshake within 5 seconds after plugging in the FK-01.
+
+---
+
+## MCP Resources & Prompts
+
+The MCP server exposes authoritative references as **resources** and correct
+call-sequence templates as **prompts**. Clients that support `resources/prompts`
+can read them directly; other clients still receive the same condensed guidance
+through the injected server instructions and tool descriptions.
+
+### Resources
+
+| URI | 内容 |
+| --- | --- |
+| `flashkey://docs/quickstart` | 上手流程：查状态 → 选端口 → 认证 → 烧录/日志 |
+| `flashkey://docs/flash-guide` | 烧录指南：端口角色、chip 默认模式/波特率、烧后验证 |
+| `flashkey://docs/error-codes` | 错误码权威表（与下方 README 表同源） |
+| `flashkey://status` | 实时设备状态（动态 JSON，离线时含 `error` 字段） |
+| `flashkey://ports` | 实时串口列表，含 `role` 字段（动态 JSON） |
+
+### Prompts
+
+| Prompt | 用途 |
+| --- | --- |
+| `flash-firmware` | 生成烧录步骤：选 `fk_log` → 认证 → 按 chip 默认参数烧录 → 验证 |
+| `recover-device` | 根据错误码输出恢复决策树 |
+| `collect-logs` | 生成日志采集步骤 |
+
+### Ai-WB2 / Ai-M62 正确用法摘要
+
+- 先 `flashkey_list_ports()`，选择 `role=fk_log`（WCH-LinkE VCP）的端口，
+  **绝不**使用 `role=fk_control`，也不要按端口名猜测。
+- `chip="ai-wb2"` 默认 **break** / `baud_rate=921600`（`make flash`）：串口打断烧录，
+  只烧 App、不烧 boot2；固件不支持串口打断或执行过 `make erase_flash` 时，
+  改用 `mode="isp"` + `make eflash`（全量含 boot2，BOOT↑ + RST 进入 ISP）。
+- `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=2000000`。
+- 烧录后必须验证：`flashkey_log()` 观察启动日志，或 AT 模组发送 `AT+GMR`。
 
 ---
 
@@ -312,3 +350,26 @@ Issues and pull requests are welcome:
 ## License
 
 [MIT](LICENSE) © 2026 Ai-Thinker Open
+
+## 错误码与恢复指引（Error Codes & Hints）
+
+工具失败时统一返回 `[错误码] 信息 + 下一步: ...`（MCP `isError`），
+Agent 与用户可据此判断：发生了什么、该不该直接重试、下一步调用哪个工具。
+本表与 `flashkey://docs/error-codes` 资源同源（由 `ERROR_GUIDE` 生成）。
+
+| code | 含义 | 建议下一步 |
+| --- | --- | --- |
+| DEVICE_NOT_FOUND | 设备未插入/未挂载 | 插入 FK-01 等待握手；WSL 先 `usbip attach`，然后重试 |
+| HANDSHAKE_FAILED | 握手失败/重连超时 | 稍候重试；检查 USB 链路 |
+| PORT_BUSY | 串口被占用/烧录进行中 | 关闭占用串口的程序，等待烧录结束再重试 |
+| PORT_WRONG_ROLE | 用错端口角色 | 用 `flashkey_list_ports()` 按 `role` 选择端口 |
+| AUTH_REQUIRED | 需要认证 | 先完成密钥认证（SET_KEY / flashkey_auth） |
+| AUTH_FAILED | 认证失败 | 重新 SET_KEY 覆盖烧录密钥 |
+| FLASH_PROTECTED | Flash 读保护 | 服务端已自动解锁重试；仍失败用 WCH-LinkUtility 解锁 |
+| FLASH_VERIFY_FAILED | 烧录校验不一致 | 确认 chip 参数与固件匹配后重烧 |
+| MODULE_NO_RESPONSE | 模组无响应 | 检查接线/波特率/是否进 Boot |
+| MODULE_MANIFEST_INVALID | 模组清单无效 | 检查 I2C 连接与模块清单 |
+| TIMEOUT | 响应超时 | 重试一次；持续超时检查连接与波特率 |
+| FRAME_CRC | 帧校验错误 | 直接重试 |
+| INVALID_ARG | 参数错误 | 按 hint 修正参数 |
+| INTERNAL_ERROR | 未分类错误 | 重试；仍失败查看服务日志 |

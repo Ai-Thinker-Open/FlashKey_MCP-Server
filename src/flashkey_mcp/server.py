@@ -34,6 +34,8 @@ from flashkey_mcp.transport import list_all_ports, FLASHKEY_VID, FLASHKEY_PID
 from flashkey_mcp.device_manager import DeviceManager
 from flashkey_mcp.modules import ModuleRegistry, module_timeout_ms
 from flashkey_mcp import firmware_tools
+from flashkey_mcp import guide as _guide
+from flashkey_mcp.errors import E, FlashkeyError, map_require_authed_error
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +63,12 @@ def _validate_flash_port(port: str) -> None:
                 hint = ""
                 if flash_ports:
                     hint = f" 请改用日志/烧录端口: {', '.join(flash_ports)}"
-                raise ToolError(
+                raise FlashkeyError(
+                    E.PORT_WRONG_ROLE,
                     f"{port} 是 FK-01 主控端口 (role=fk_control, MCP 内部专用)，"
-                    f"不能用于烧录或日志。{hint}"
+                    f"不能用于烧录或日志。{hint}",
+                    hint="请用 flashkey_list_ports() 按 role 字段选择端口",
+                    recovery_tool="flashkey_list_ports",
                 )
             return  # port found, not FK-01 control — OK
     # Port not found in system — let the actual serial open fail naturally
@@ -101,16 +106,49 @@ def _tool_wrapper(fn: Any, require_auth: bool = True) -> Any:
     """Wrap a tool function with common error handling.
 
     ``require_auth=True`` tools call ``DeviceManager.require_authed()``
-    before the tool body.  Errors are raised as ``ToolError`` so FastMCP
-    can set ``isError: true`` on the MCP response.
+    before the tool body.  All failures are normalized to
+    :class:`FlashkeyError` with a stable error ``code``, a ``hint`` for
+    the next step, and a ``retryable`` flag, so agents can decide
+    whether to retry, recover, or stop.
     """
     import functools
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> dict:
         if require_auth:
-            _get_dm().require_authed()
-        return fn(*args, **kwargs)
+            try:
+                _get_dm().require_authed()
+            except FlashkeyError:
+                raise
+            except RuntimeError as exc:
+                raise map_require_authed_error(exc) from exc
+            except Exception as exc:
+                raise FlashkeyError(
+                    E.AUTH_REQUIRED, f"认证检查失败: {exc}",
+                    hint="先完成密钥认证（SET_KEY / flashkey_auth 流程）后重试",
+                ) from exc
+        try:
+            return fn(*args, **kwargs)
+        except FlashkeyError:
+            raise
+        except TimeoutError as exc:
+            raise FlashkeyError(
+                E.TIMEOUT, str(exc),
+                hint="重试一次；若持续超时请检查设备/模组连接与波特率",
+                retryable=True,
+            ) from exc
+        except ToolError as exc:
+            raise FlashkeyError(
+                E.INTERNAL, str(exc),
+                hint="重试；若仍失败请查看 flashkey-mcp 服务日志",
+                retryable=True,
+            ) from exc
+        except Exception as exc:
+            raise FlashkeyError(
+                E.INTERNAL, f"{type(exc).__name__}: {exc}",
+                hint="重试；若仍失败请查看 flashkey-mcp 服务日志",
+                retryable=True,
+            ) from exc
 
     return wrapper
 
@@ -120,7 +158,13 @@ def _require_fk():
     dm = _get_dm()
     fk = dm.fk
     if fk is None:
-        raise ToolError("设备未连接，请插入 FlashKey FK-01")
+        raise FlashkeyError(
+            E.DEVICE_NOT_FOUND,
+            "设备未连接，请插入 FlashKey FK-01",
+            hint="插入 FK-01 并等待握手；WSL 下先确认 usbip 已挂载",
+            retryable=True,
+            recovery_tool="flashkey_status / flashkey_list_ports",
+        )
     return dm, fk
 
 
@@ -151,6 +195,87 @@ def _tool_status() -> dict:
 def _tool_list_ports() -> dict:
     """List all available serial ports on the system."""
     return {"ports": list_all_ports()}
+
+# ── flashkey_recover (NEW, no auth required) ─────────────────────────
+
+def _usbipd_reattach_fk() -> list[str]:
+    """Best-effort WSL usbipd re-attach of FK-01 / WCH-LinkE USB devices.
+
+    Returns a list of human-readable notes about what was done.
+    No-op when usbipd.exe is not available (non-WSL host).
+    """
+    import shutil
+    import subprocess
+
+    exe = shutil.which("usbipd.exe")
+    if not exe:
+        return ["usbipd.exe 不可用（非 WSL 环境），跳过自动重挂载"]
+
+    notes: list[str] = []
+    try:
+        out = subprocess.run([exe, "list"], capture_output=True, text=True, timeout=15)
+        lines = (out.stdout or "").splitlines()
+    except Exception as exc:
+        return [f"usbipd list 失败: {exc}"]
+
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if "Attached" in line:
+            continue
+        busid, vidpid = parts[0], parts[1]
+        if vidpid not in ("1a86:fe0d", "1a86:8010"):
+            continue
+        try:
+            r = subprocess.run(
+                [exe, "attach", "--wsl", "--busid", busid],
+                capture_output=True, text=True, timeout=30,
+            )
+            notes.append(
+                f"usbipd attach {busid} ({vidpid}): "
+                + ((r.stdout or r.stderr or "").strip() or f"exit={r.returncode}")
+            )
+        except Exception as exc:
+            notes.append(f"usbipd attach {busid} 失败: {exc}")
+
+    return notes or ["未发现需要重挂载的 FK-01/WCH-LinkE 设备"]
+
+
+def _tool_recover(reattach: bool = False) -> dict:
+    """One-stop recovery: optional USB re-attach + forced re-handshake."""
+    dm = _get_dm()
+    notes: list[str] = []
+    if reattach:
+        notes.extend(_usbipd_reattach_fk())
+    try:
+        result = dm.recover()
+    except Exception as exc:
+        raise FlashkeyError(
+            E.HANDSHAKE_FAILED, f"恢复握手失败: {exc}",
+            hint="检查 USB 链路后重试 flashkey_recover",
+            retryable=True,
+            recovery_tool="flashkey_recover",
+        ) from exc
+    status = dm.get_status()
+    hints: list[str] = []
+    if not result.get("connected"):
+        hints.append(
+            "设备未就绪：确认 FK-01 已插入；WSL 下先 usbip attach，"
+            "再调 flashkey_recover(reattach=True)"
+        )
+    elif not result.get("authed"):
+        hints.append("设备已连接但未认证：完成密钥认证后重试")
+    hints.extend(notes)
+    return {
+        "ok": bool(result.get("connected") and result.get("authed")),
+        "connected": result.get("connected", False),
+        "authed": result.get("authed", False),
+        "error": result.get("error", ""),
+        "status": status,
+        "hints": hints,
+    }
+
 
 
 # ── flashkey_ping ────────────────────────────────────────────────────
@@ -400,7 +525,7 @@ def _flash_break_mode(
 # ── Chip → default mode ──────────────────────────────────────────────
 
 _FLASH_DEFAULT_MODE: dict[str, str] = {
-    # BL602: always tool-first (flash tool runs first, RST pulse on prompt).
+    # BL602: 默认串口打断（make flash）；固件不支持打断或擦除后改用 ISP（make eflash）。
     # BL616/BL618: BOOT+RST first, then flash tool.
     "bl602": "break",
     "bl616": "isp",
@@ -411,7 +536,7 @@ _FLASH_DEFAULT_MODE: dict[str, str] = {
 def _tool_flash(
     firmware_path: str,
     flash_port: str,
-    chip: str = "bl616",
+    chip: str = "ai-m62",
     baud_rate: int = 2000000,
     tool: str = "",
     sdk_path: str = "",
@@ -424,14 +549,17 @@ def _tool_flash(
     **break** (default for BL602) — serial break / 串口打断:
         Run flash tool → wait for "please reset" prompt →
         RST pulse → wait for completion → recovery.
+        BL602 只烧 App，不烧 boot2；无法触发时改用 ISP。
 
-    **isp** (default for BL616/BL618):
+    **isp** (default for BL616/BL618; BL602 传 mode="isp") — make eflash:
         BOOT↑ → RST pulse → run flash tool → RST → BOOT↓.
+        BL602 的 ISP 模式全量烧录（含 boot2），`make erase_flash` 擦除后必须用它。
 
     FK-01 handles BOOT/RST timing.  The actual firmware write is delegated
     to an external tool::
 
-        BL602:  ``make -C <sdk_path> flash p=<port> b=<baud>``
+        BL602 break: ``make -C <sdk_path> flash p=<port> b=<baud>``
+        BL602 isp:   ``make -C <sdk_path> eflash p=<port> b=<baud>``
         BL616:  ``make -C <sdk_path> flash CHIP=bl616 COMX=<port> BAUDRATE=<baud_rate>``
         BL618:  same as BL616 with CHIP=bl618
 
@@ -439,29 +567,42 @@ def _tool_flash(
     take 10–120 seconds.
     """
     global _flash_active_port, _flash_cleanup_needed, _flash_cleanup_dm
+    chip = _guide.normalize_chip(chip)
 
     # -- Validate params early ─────────────────────────────────────
     if not mode:
         mode = _FLASH_DEFAULT_MODE.get(chip, "isp")
 
     if mode not in ("break", "isp"):
-        raise ToolError(f"不支持的烧录模式: {mode}。可选: break, isp")
+        raise FlashkeyError(
+            E.INVALID_ARG, f"不支持的烧录模式: {mode}。可选: break, isp",
+            hint="请使用 break 或 isp 模式",
+        )
 
     # Reject FK-01 control port — must use fk_log (WCH-LinkE VCP)
     _validate_flash_port(flash_port)
 
     fw_path = Path(firmware_path).expanduser().resolve()
     if not fw_path.is_file():
-        raise ToolError(f"固件文件不存在: {firmware_path}")
+        raise FlashkeyError(
+            E.INVALID_ARG, f"固件文件不存在: {firmware_path}",
+            hint="检查 firmware_path 是否指向真实存在的固件文件",
+        )
 
     dm, fk = _require_fk()
 
     # -- Resolve flash tool command ----------------------------------
-    flash_cmd = _resolve_flash_tool(chip, tool, sdk_path, flash_port, baud_rate, fw_path)
+    flash_cmd = _resolve_flash_tool(
+        chip, tool, sdk_path, flash_port, baud_rate, fw_path, mode,
+    )
 
     # -- Acquire flash lock (mutual exclusion with flashkey_log) ------
     if not _flash_lock.acquire(blocking=False):
-        raise ToolError("烧录进行中，请等待当前烧录完成后再试")
+        raise FlashkeyError(
+            E.PORT_BUSY, "烧录进行中，请等待当前烧录完成后再试",
+            hint="等待当前烧录结束后重试",
+            retryable=True,
+        )
 
     _flash_active_port = flash_port
     start_time = time.monotonic()
@@ -494,33 +635,7 @@ def _tool_flash(
             "mode": mode,
         }
 
-    # ── BL602 with mode=isp (still uses serial break, same as above) ──
-    if chip == "bl602":
-        _flash_cleanup_needed = True
-        _flash_cleanup_dm = dm
-
-        try:
-            success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path)
-        finally:
-            _flash_cleanup_needed = False
-            try:
-                fk.commands.rst_pulse(50)
-            except Exception as exc:
-                logger.error("Target recovery failed: %s", exc)
-                output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
-            _flash_active_port = ""
-            _flash_lock.release()
-
-        duration = time.monotonic() - start_time
-        return {
-            "success": success,
-            "output": "\n".join(output_lines),
-            "duration": round(duration, 1),
-            "chip": chip,
-            "mode": mode,
-        }
-
-    # ── ISP mode (BL616/BL618) ────────────────────────────────────────
+    # ── ISP mode (BL602 make eflash / BL616/BL618 make flash) ────────
     try:
         # Enter bootloader mode: BOOT=HIGH + RST pulse before flash tool
         fk.commands.boot_set(True)
@@ -585,6 +700,10 @@ _FLASH_MAKE_ARGS_MAP: dict[str, str] = {
     "bl618": "CHIP=bl618 COMX={port} BAUDRATE={baud}",
 }
 
+_FLASH_MAKE_ISP_ARGS_MAP: dict[str, str] = {
+    "bl602": "eflash p={port} b={baud}",
+}
+
 
 def _resolve_flash_tool(
     chip: str,
@@ -593,55 +712,77 @@ def _resolve_flash_tool(
     flash_port: str,
     baud_rate: int,
     fw_path: Path,
+    mode: str = "",
 ) -> list[str]:
     """Resolve the flash tool command for the target chip.
 
     Priority:
     1. User-supplied ``tool`` (run as-is with args substitued)
-    2. ``make flash`` from SDK (if ``sdk_path`` is set)
-    3. ``make flash`` from current directory (if Makefile has 'flash' target)
+    2. ``make flash`` / ``make eflash`` from SDK (if ``sdk_path`` is set)
+    3. same from current directory (if Makefile has the target)
     4. Error with install instructions
     """
     supported = sorted(_FLASH_MAKE_ARGS_MAP.keys())
     if chip not in _FLASH_MAKE_ARGS_MAP:
-        raise ToolError(
-            f"不支持的芯片类型: {chip}。当前支持: {', '.join(supported)}"
+        raise FlashkeyError(
+            E.INVALID_ARG,
+            f"不支持的芯片类型: {chip}。当前支持: {', '.join(supported)}",
+            hint=f"请选择支持的芯片类型: {', '.join(supported)}",
         )
 
     # -- 1. User-supplied custom tool ---------------------------------
     if tool:
         return _build_custom_cmd(tool, chip, flash_port, baud_rate, fw_path)
 
-    # -- 2. make flash from SDK ---------------------------------------
+    # -- 2. make flash / make eflash from SDK --------------------------
     make_dir = sdk_path or "."
     makefile = Path(make_dir) / "Makefile"
 
     if makefile.is_file():
-        # Verify the Makefile has a 'flash' target
+        make_target = (
+            "eflash" if mode == "isp" and chip == "bl602" else "flash"
+        )
+        # Verify the Makefile has the target
         try:
             result = subprocess.run(
-                ["make", "-C", make_dir, "-n", "flash"],
+                ["make", "-C", make_dir, "-n", make_target],
                 capture_output=True, text=True, timeout=5,
             )
             if result.returncode != 2:  # 2 = no such target
-                args_tpl = _FLASH_MAKE_ARGS_MAP[chip]
+                args_tpl = (
+                    _FLASH_MAKE_ISP_ARGS_MAP.get(chip)
+                    if mode == "isp" and chip == "bl602"
+                    else _FLASH_MAKE_ARGS_MAP[chip]
+                )
                 args_str = args_tpl.format(port=flash_port, baud=baud_rate)
-                return ["make", "-C", make_dir, "flash"] + args_str.split()
+                return ["make", "-C", make_dir, make_target] + args_str.split()
         except Exception:
             pass
 
     # -- 3. No tool found → error with instructions ------------------
-    if chip == "bl602":
-        raise ToolError(
-            "未找到 BL602 烧录工具。请克隆 Ai-Thinker-WB2 SDK 并设置 sdk_path，"
+    if chip == "bl602" and mode == "isp":
+        raise FlashkeyError(
+            E.INVALID_ARG,
+            "未找到 Ai-WB2 ISP 烧录工具（make eflash）。请克隆 Ai-Thinker-WB2 SDK 并设置 sdk_path，"
             "或通过 tool 参数指定烧录命令。\n"
-            "SDK: https://github.com/Ai-Thinker-Open/Ai-Thinker-WB2"
+            "SDK: https://github.com/Ai-Thinker-Open/Ai-Thinker-WB2",
+            hint="设置 sdk_path 或通过 tool 参数指定 make eflash 命令",
+        )
+    elif chip == "bl602":
+        raise FlashkeyError(
+            E.INVALID_ARG,
+            "未找到 Ai-WB2 烧录工具（make flash）。请克隆 Ai-Thinker-WB2 SDK 并设置 sdk_path，"
+            "或通过 tool 参数指定烧录命令。\n"
+            "SDK: https://github.com/Ai-Thinker-Open/Ai-Thinker-WB2",
+            hint="设置 sdk_path 或通过 tool 参数指定烧录命令",
         )
     else:
-        raise ToolError(
+        raise FlashkeyError(
+            E.INVALID_ARG,
             f"未找到 {chip.upper()} 烧录工具。请克隆 Bouffalo SDK 并设置 sdk_path，"
             f"或通过 tool 参数指定烧录命令。\n"
-            "SDK: https://github.com/bouffalolab/bouffalo_sdk"
+            "SDK: https://github.com/bouffalolab/bouffalo_sdk",
+            hint="设置 sdk_path 或通过 tool 参数指定烧录命令",
         )
 
 
@@ -688,7 +829,11 @@ def _tool_log(
 
     # Mutual exclusion with flashkey_flash on the same port
     if _flash_lock.locked() and _flash_active_port == port:
-        raise ToolError("烧录进行中，串口正忙，请等待烧录完成")
+        raise FlashkeyError(
+            E.PORT_BUSY, "烧录进行中，串口正忙，请等待烧录完成",
+            hint="等待烧录结束后重试",
+            retryable=True,
+        )
 
     duration = min(max(duration, 1), 30)  # clamp 1–30 s (NFR-4)
     max_lines = max(max_lines, 1)
@@ -699,7 +844,11 @@ def _tool_log(
     try:
         ser = pyserial.Serial(port=port, baudrate=baud_rate, timeout=0.1)
     except Exception as exc:
-        raise ToolError(f"无法打开串口 {port}: {exc}")
+        raise FlashkeyError(
+            E.PORT_BUSY, f"无法打开串口 {port}: {exc}",
+            hint="确认设备已插入且没有其他程序占用该串口；WSL 下先 usbip attach",
+            retryable=True,
+        )
 
     try:
         ser.reset_input_buffer()
@@ -779,7 +928,11 @@ def _tool_send(
 
     # Mutual exclusion with flashkey_flash on the same port
     if _flash_lock.locked() and _flash_active_port == port:
-        raise ToolError("烧录进行中，串口正忙，请等待烧录完成")
+        raise FlashkeyError(
+            E.PORT_BUSY, "烧录进行中，串口正忙，请等待烧录完成",
+            hint="等待烧录结束后重试",
+            retryable=True,
+        )
 
     # Decode data based on encoding
     if encoding == "text":
@@ -789,16 +942,28 @@ def _tool_send(
     elif encoding == "hex":
         hex_str = data.replace(" ", "").replace("\n", "").replace("\t", "")
         if len(hex_str) % 2 != 0:
-            raise ToolError("hex 编码数据长度必须为偶数")
+            raise FlashkeyError(
+                E.INVALID_ARG, "hex 编码数据长度必须为偶数",
+                hint="提供偶数长度的 hex 字符串",
+            )
         try:
             raw = bytes.fromhex(hex_str)
         except ValueError as exc:
-            raise ToolError(f"hex 解码失败: {exc}")
+            raise FlashkeyError(
+                E.INVALID_ARG, f"hex 解码失败: {exc}",
+                hint="检查 hex 字符串是否合法",
+            )
     else:
-        raise ToolError(f"不支持的编码: {encoding}。可选: text, hex")
+        raise FlashkeyError(
+            E.INVALID_ARG, f"不支持的编码: {encoding}。可选: text, hex",
+            hint="请使用 text 或 hex",
+        )
 
     if not raw:
-        raise ToolError("发送数据不能为空")
+        raise FlashkeyError(
+            E.INVALID_ARG, "发送数据不能为空",
+            hint="提供非空数据",
+        )
 
     # Clamp read_timeout
     read_timeout = min(max(read_timeout, 0.1), 10.0)
@@ -809,7 +974,11 @@ def _tool_send(
     try:
         ser = pyserial.Serial(port=port, baudrate=baud_rate, timeout=0.1)
     except Exception as exc:
-        raise ToolError(f"无法打开串口 {port}: {exc}")
+        raise FlashkeyError(
+            E.PORT_BUSY, f"无法打开串口 {port}: {exc}",
+            hint="确认设备已插入且没有其他程序占用该串口；WSL 下先 usbip attach",
+            retryable=True,
+        )
 
     try:
         ser.reset_input_buffer()
@@ -862,11 +1031,11 @@ def _summarize_data(raw: bytes, encoding: str) -> str:
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
+from mcp.server.fastmcp.resources import FunctionResource, TextResource  # noqa: E402
 
 mcp = FastMCP(
     name="flashkey-mcp",
-    instructions="MCP server for FlashKey FK-01 — AI-native USB programmer & debugger.  "
-    "Plug in FK-01 for automatic handshake; use flashkey_status() to check state.",
+    instructions=_guide._INSTRUCTIONS,
 )
 
 # ── Register 19 tools ───────────────────────────────────────────────
@@ -894,6 +1063,17 @@ mcp.add_tool(
         "role=fk_log     → WCH-LinkE VCP (FK-01 v0.1.1 日志/烧录口，最高 921600)\n"
         "role=unknown    → 其他设备\n"
         "烧录或采集日志前，务必先调用此工具确认端口 role。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_recover, require_auth=False),
+    name="flashkey_recover",
+    description=(
+        "🛠 一站式恢复：可选 USB 重挂载 + 强制重新握手。无需认证，工具失败时优先调用。\n"
+        "参数:\n"
+        "  reattach: 是否先尝试用 usbipd.exe 重新挂载 FK-01 / WCH-LinkE 设备（WSL 环境），默认 False\n"
+        "返回: ok(是否恢复成功)、connected、authed、error(失败原因)、status(完整状态)、hints(下一步建议)\n"
+        "典型用法: 工具返回 DEVICE_NOT_FOUND / HANDSHAKE_FAILED / PORT_BUSY 时，先调本工具恢复再重试。"
     ),
 )
 mcp.add_tool(
@@ -1003,7 +1183,11 @@ def _tool_flash_monitor(
 
     # Acquire flash lock
     if not _flash_lock.acquire(blocking=False):
-        raise ToolError("烧录进行中，请等待当前烧录完成后再试")
+        raise FlashkeyError(
+            E.PORT_BUSY, "烧录进行中，请等待当前烧录完成后再试",
+            hint="等待当前烧录结束后重试",
+            retryable=True,
+        )
 
     global _flash_active_port, _flash_cleanup_needed, _flash_cleanup_dm
     _flash_cleanup_needed = True
@@ -1031,7 +1215,7 @@ mcp.add_tool(
     name="flashkey_flash_monitor",
     description=(
         "🔍 运行烧录命令并监控输出，检测到复位提示时自动通过 FK-01 RST 引脚复位芯片。\n"
-        "用于 BL602 串口打断烧录模式：make flash 先发 sync 信号，然后打印复位提示等待用户复位，\n"
+        "用于 Ai-WB2 串口打断烧录模式：make flash 先发 sync 信号，然后打印复位提示等待用户复位，\n"
         "此工具自动检测提示并发送 RST 脉冲，烧录完成后再次复位使芯片正常启动。\n"
         "参数:\n"
         "  command: 烧录命令 (如 'make -C /path flash p=/dev/ttyUSB0 b=921600')\n"
@@ -1075,7 +1259,8 @@ mcp.add_tool(
     name="flashkey_enter_bootloader",
     description=(
         "组合操作: BOOT 拉高 → RST 脉冲 → 目标芯片进入烧录模式。"
-        "等效于 boot_set(True) + rst_pulse()。需要认证。"
+        "等效于 boot_set(True) + rst_pulse()。需要认证。\n"
+        "常见错误: AUTH_REQUIRED(先完成密钥认证)、DEVICE_NOT_FOUND(设备掉线→flashkey_recover)。"
     ),
 )
 
@@ -1093,19 +1278,24 @@ mcp.add_tool(
         "注意：WCH-LinkE VCP (fk_log) 最高仅支持 921600，需要更高波特率时请用外接 USB-UART。\n"
         "\n"
         "支持两种烧录模式:\n"
-        "  BL602: 串口打断模式 (BOOT 拉高 → make flash 通过 DTR 复位并握手 → 烧录完成)。\n"
-        "         FK-01 只控制 BOOT，复位由串口桥 (WCH-LinkE VCP) 的 DTR 处理。\n"
-        "         mode 参数对 BL602 无效。\n"
-        "  BL616/BL618 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
+        "  Ai-WB2 break（默认，串口打断）: make flash 等待 'Please Press Reset Key!' →\n"
+        "         FK-01 RST 脉冲触发复位烧录；只烧 App 不烧 boot2，无法触发时改用 ISP。\n"
+        "  Ai-WB2 isp: mode=\"isp\" → BOOT↑ + RST 脉冲进入 ISP 模式，执行 make eflash；\n"
+        "         全量烧录含 boot2；make erase_flash 擦除芯片后必须用它。\n"
+        "  Ai-M62 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
         "  flash_port: 烧录串口 — 必须选 flashkey_list_ports() 中 role=fk_log 的端口\n"
-        "  chip: 芯片类型，支持 bl602/bl616/bl618\n"
-        "  baud_rate: 烧录波特率 (bl602 默认 921600, bl616/bl618 默认 2000000)\n"
-        "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 占位符)\n"
-        "  sdk_path: 可选，芯片 SDK 根目录 (用于 make flash)\n"
-        "  mode: 烧录模式 (仅 BL616/BL618 有效，默认 isp)。BL602 忽略此参数，始终 tool-first。"
-        "需要认证。"
+        "  chip: 模组名称，支持 Ai-WB2 / Ai-M62\n"
+        "  baud_rate: 烧录波特率 (Ai-WB2 默认 921600, Ai-M62 默认 2000000)\n"
+        "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 或 Ai-WB2 ISP\n"
+        "         'make eflash p={port} b={baud}' 占位符)\n"
+        "  sdk_path: 可选，芯片 SDK 根目录 (用于 make flash / make eflash)\n"
+        "  mode: 烧录模式 (break/isp)。Ai-WB2 默认 break，Ai-M62 默认 isp；Ai-WB2 ISP 使用 make eflash。"
+        "需要认证。\n"
+        "常见错误: PORT_WRONG_ROLE(端口选错→先用 list_ports 按 role 选 fk_log)、"
+        "INVALID_ARG(chip/固件路径错→按 hint 修正)、FLASH_VERIFY_FAILED(chip 与固件不匹配→重烧)、"
+        "DEVICE_NOT_FOUND(设备掉线→flashkey_recover(reattach=True))。"
     ),
 )
 mcp.add_tool(
@@ -1121,7 +1311,9 @@ mcp.add_tool(
         "  max_lines: 返回最大行数，grep 过滤后截取，默认 50\n"
         "  grep: 过滤关键词(子串匹配，不区分大小写)，None 表示不过滤\n"
         "返回: lines(实际行数)、duration(采集时长)、truncated(是否截断)、content(日志文本)\n"
-        "与 flashkey_flash 互斥，串口忙时返回 isError。"
+        "与 flashkey_flash 互斥，串口忙时返回 isError。\n"
+        "常见错误: PORT_WRONG_ROLE(端口选错→按 role 选 fk_log)、PORT_BUSY(与烧录互斥→等待结束)、"
+        "DEVICE_NOT_FOUND(设备掉线→flashkey_recover(reattach=True))。"
     ),
 )
 mcp.add_tool(
@@ -1218,9 +1410,96 @@ mcp.add_tool(
         "普通烧录失败且疑似读保护/写保护时，会自动用带 unlock 的全片擦除+烧录重试一次；"
         "仍失败则返回 WCH-LinkUtility 手动解锁指引。\n"
         "返回: ok、before_version、after_version、unlocked_retried、"
-        "output_summary、duration_s；dry_run 时含 commands。"
+        "output_summary、duration_s；dry_run 时含 commands。\n"
+        "常见错误: DEVICE_NOT_FOUND(WCH-LinkE 未挂载/接线→flashkey_recover(reattach=True))、"
+        "FLASH_PROTECTED(已自动解锁重试，仍失败用 WCH-LinkUtility)、AUTH_REQUIRED(先认证)。"
     ),
 )
+
+
+# ======================================================================
+# MCP Resources & Prompts
+# ======================================================================
+
+
+def _resource_status() -> dict:
+    """实时状态快照；设备离线/异常时返回含 error 字段的 JSON，不抛异常。"""
+    try:
+        result = _tool_status()
+    except Exception as exc:
+        result = {
+            "authed": False,
+            "idle": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if result.get("authed") is not True and "error" not in result:
+        result["error"] = "FK-01 未连接/未认证（authed=false）"
+    return result
+
+
+def _resource_ports() -> dict:
+    """实时串口列表；异常时返回含 error 字段的 JSON，不抛异常。"""
+    try:
+        return _tool_list_ports()
+    except Exception as exc:
+        return {
+            "ports": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+mcp.add_resource(
+    TextResource(
+        uri="flashkey://docs/quickstart",
+        name="flashkey-docs-quickstart",
+        title="FlashKey 快速上手",
+        description="FK-01 上手流程：查状态、选端口、认证、烧录/日志。",
+        mime_type="text/markdown",
+        text=_guide.QUICKSTART_DOC,
+    )
+)
+mcp.add_resource(
+    TextResource(
+        uri="flashkey://docs/flash-guide",
+        name="flashkey-docs-flash-guide",
+        title="FlashKey 烧录指南",
+        description="Ai-WB2/Ai-M62 烧录端口选择、默认模式/波特率与验证步骤。",
+        mime_type="text/markdown",
+        text=_guide.FLASH_GUIDE_DOC,
+    )
+)
+mcp.add_resource(
+    TextResource(
+        uri="flashkey://docs/error-codes",
+        name="flashkey-docs-error-codes",
+        title="FlashKey 错误码表",
+        description="全部错误码的含义、下一步、是否可重试与恢复工具。",
+        mime_type="text/markdown",
+        text=_guide.ERROR_CODES_DOC,
+    )
+)
+mcp.add_resource(
+    FunctionResource(
+        uri="flashkey://status",
+        name="flashkey-status",
+        title="FlashKey 实时状态",
+        description="实时设备状态快照（无需认证；离线时包含 error 字段）。",
+        mime_type="application/json",
+        fn=_resource_status,
+    )
+)
+mcp.add_resource(
+    FunctionResource(
+        uri="flashkey://ports",
+        name="flashkey-ports",
+        title="FlashKey 实时串口列表",
+        description="实时串口列表（含 role 字段；异常时包含 error 字段）。",
+        mime_type="application/json",
+        fn=_resource_ports,
+    )
+)
+
+_guide.register_prompts(mcp)
 
 
 # ======================================================================

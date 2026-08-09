@@ -3,7 +3,9 @@
 Covers:
 - Server startup and module imports
 - JSON-RPC initialize handshake
-- tools/list returns all 16 tools
+- tools/list returns all 28 tools
+- resources/list + resources/read
+- prompts/list + prompts/get
 - Uninitialized request rejection
 - Auth middleware (no hardware → graceful error)
 - Garbage input tolerance
@@ -29,6 +31,7 @@ LATEST_PROTOCOL_VERSION = "2025-11-25"
 EXPECTED_TOOLS = [
     "flashkey_status",
     "flashkey_list_ports",
+    "flashkey_recover",
     "flashkey_module_info",
     "flashkey_ping",
     "flashkey_auth_status",
@@ -55,6 +58,16 @@ EXPECTED_TOOLS = [
     "flashkey_firmware_check",
     "flashkey_firmware_flash",
 ]
+
+EXPECTED_RESOURCES = [
+    "flashkey://docs/quickstart",
+    "flashkey://docs/flash-guide",
+    "flashkey://docs/error-codes",
+    "flashkey://status",
+    "flashkey://ports",
+]
+
+EXPECTED_PROMPTS = ["flash-firmware", "recover-device", "collect-logs"]
 
 _FAILURES: list[str] = []
 
@@ -467,6 +480,148 @@ def test_unknown_tool() -> None:
         stop_server(proc)
 
 
+# ── Test 8: Resources ───────────────────────────────────────────────────
+
+def test_resources_list_and_read() -> None:
+    """resources/list returns 5 URIs; docs read with key facts."""
+    proc = start_server()
+    try:
+        initialize_server(proc)
+
+        result = send_request(proc, "resources/list", request_id=5)
+        assert "result" in result, f"No 'result': {result}"
+        resources = result["result"]["resources"]
+        uris = [r["uri"] for r in resources]
+        assert set(EXPECTED_RESOURCES) <= set(uris), (
+            f"Missing resources: {set(EXPECTED_RESOURCES) - set(uris)}"
+        )
+
+        flash = send_request(
+            proc,
+            "resources/read",
+            {"uri": "flashkey://docs/flash-guide"},
+            request_id=6,
+        )
+        assert "result" in flash, f"No 'result': {flash}"
+        flash_text = flash["result"]["contents"][0]["text"]
+        assert "fk_log" in flash_text
+        assert "Ai-WB2" in flash_text
+        assert "Ai-M62" in flash_text
+        assert "921600" in flash_text
+
+        errors = send_request(
+            proc,
+            "resources/read",
+            {"uri": "flashkey://docs/error-codes"},
+            request_id=7,
+        )
+        assert "result" in errors, f"No 'result': {errors}"
+        errors_text = errors["result"]["contents"][0]["text"]
+        assert "AUTH_REQUIRED" in errors_text
+        assert "DEVICE_NOT_FOUND" in errors_text
+
+        print(
+            f"  test_resources_list_and_read ✅  "
+            f"({len(uris)} resources, docs read ok)"
+        )
+    except Exception as exc:
+        _fail(f"test_resources_list_and_read FAILED: {exc}")
+    finally:
+        stop_server(proc)
+
+
+# ── Test 9: Prompts ─────────────────────────────────────────────────────
+
+def test_prompts_list_and_get() -> None:
+    """prompts/list returns 3 names; flash-firmware renders correct sequence."""
+    proc = start_server()
+    try:
+        initialize_server(proc)
+
+        result = send_request(proc, "prompts/list", request_id=8)
+        assert "result" in result, f"No 'result': {result}"
+        prompt_defs = result["result"]["prompts"]
+        prompts = [p["name"] for p in prompt_defs]
+        assert set(EXPECTED_PROMPTS) <= set(prompts), (
+            f"Missing prompts: {set(EXPECTED_PROMPTS) - set(prompts)}"
+        )
+        flash_firmware = next(
+            p for p in prompt_defs if p["name"] == "flash-firmware"
+        )
+        assert len(flash_firmware.get("arguments", [])) == 3, (
+            f"flash-firmware should expose only 3 arguments: {flash_firmware}"
+        )
+
+        rendered = send_request(
+            proc,
+            "prompts/get",
+            {
+                "name": "flash-firmware",
+                "arguments": {"chip": "ai-wb2", "firmware_path": "/tmp/fw.bin"},
+            },
+            request_id=9,
+        )
+        assert "result" in rendered, f"No 'result': {rendered}"
+        messages = rendered["result"]["messages"]
+        assert len(messages) == 2
+        texts = " ".join(m["content"]["text"] for m in messages)
+        assert "flashkey_list_ports" in texts
+        assert "fk_log" in texts
+        assert "921600" in texts
+        assert 'chip="ai-wb2"' in texts
+        assert "Ai-WB2" in texts
+        assert "flashkey_flash" in texts
+
+        print(
+            f"  test_prompts_list_and_get ✅  "
+            f"({len(prompts)} prompts, flash-firmware rendered)"
+        )
+    except Exception as exc:
+        _fail(f"test_prompts_list_and_get FAILED: {exc}")
+    finally:
+        stop_server(proc)
+
+
+# ── Test 10: Dynamic resources (offline-safe) ───────────────────────────
+
+def test_dynamic_resources_offline_safe() -> None:
+    """status/ports resources must return JSON instead of crashing offline."""
+    proc = start_server()
+    try:
+        initialize_server(proc)
+
+        status = send_request(
+            proc,
+            "resources/read",
+            {"uri": "flashkey://status"},
+            request_id=10,
+        )
+        assert "result" in status, f"No 'result': {status}"
+        status_data = json.loads(status["result"]["contents"][0]["text"])
+        assert isinstance(status_data, dict)
+        assert status_data.get("authed") is True or "error" in status_data, (
+            f"Offline status should include error: {status_data}"
+        )
+
+        ports = send_request(
+            proc,
+            "resources/read",
+            {"uri": "flashkey://ports"},
+            request_id=11,
+        )
+        assert "result" in ports, f"No 'result': {ports}"
+        ports_data = json.loads(ports["result"]["contents"][0]["text"])
+        assert isinstance(ports_data, dict)
+        assert "ports" in ports_data
+        assert isinstance(ports_data["ports"], list)
+
+        print("  test_dynamic_resources_offline_safe ✅  JSON resources readable")
+    except Exception as exc:
+        _fail(f"test_dynamic_resources_offline_safe FAILED: {exc}")
+    finally:
+        stop_server(proc)
+
+
 # ── Runner ──────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -478,11 +633,14 @@ def run_all() -> None:
         ("Server Import", test_server_import),
         ("Server has main()", test_server_has_main),
         ("JSON-RPC Initialize", test_jsonrpc_initialize),
-        ("tools/list (15 tools)", test_tools_list),
+        ("tools/list (28 tools)", test_tools_list),
         ("Uninitialized Rejected", test_uninitialized_rejected),
         ("Auth Middleware (no HW)", test_auth_middleware_no_hardware),
         ("Garbage Input", test_garbage_input),
         ("Unknown Tool", test_unknown_tool),
+        ("Resources list/read", test_resources_list_and_read),
+        ("Prompts list/get", test_prompts_list_and_get),
+        ("Dynamic Resources (offline)", test_dynamic_resources_offline_safe),
     ]
 
     print("=" * 64)
