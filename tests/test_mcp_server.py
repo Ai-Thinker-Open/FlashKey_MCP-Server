@@ -3,7 +3,7 @@
 Covers:
 - Server startup and module imports
 - JSON-RPC initialize handshake
-- tools/list returns all 28 tools
+- tools/list returns all 30 tools
 - resources/list + resources/read
 - prompts/list + prompts/get
 - Uninitialized request rejection
@@ -29,34 +29,36 @@ sys.path.insert(0, SRC_DIR)
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 
 EXPECTED_TOOLS = [
-    "flashkey_status",
-    "flashkey_list_ports",
-    "flashkey_recover",
-    "flashkey_module_info",
-    "flashkey_ping",
-    "flashkey_auth_status",
-    "flashkey_boot_set",
-    "flashkey_boot_get",
-    "flashkey_rst_set",
-    "flashkey_rst_get",
-    "flashkey_rst_pulse",
-    "flashkey_v5v_set",
-    "flashkey_v5v_get",
-    "flashkey_v3v3_set",
-    "flashkey_v3v3_get",
-    "flashkey_vusb_set",
-    "flashkey_vusb_get",
-    "flashkey_flash_monitor",
-    "flashkey_get_version",
-    "flashkey_get_uid",
-    "flashkey_get_events",
-    "flashkey_get_status",
-    "flashkey_enter_bootloader",
-    "flashkey_flash",
-    "flashkey_log",
-    "flashkey_send",
-    "flashkey_firmware_check",
-    "flashkey_firmware_flash",
+    "status",
+    "list_ports",
+    "recover",
+    "module_info",
+    "ping",
+    "auth_status",
+    "boot_set",
+    "boot_get",
+    "rst_set",
+    "rst_get",
+    "rst_pulse",
+    "v5v_set",
+    "v5v_get",
+    "v3v3_set",
+    "v3v3_get",
+    "vusb_set",
+    "vusb_get",
+    "flash_guide",
+    "get_version",
+    "get_uid",
+    "get_events",
+    "get_status",
+    "enter_bootloader",
+    "flash",
+    "log_open",
+    "log_close",
+    "log_dump",
+    "send",
+    "firmware_check",
+    "firmware_flash",
 ]
 
 EXPECTED_RESOURCES = [
@@ -65,9 +67,15 @@ EXPECTED_RESOURCES = [
     "flashkey://docs/error-codes",
     "flashkey://status",
     "flashkey://ports",
+    "flashkey://log",
 ]
 
 EXPECTED_PROMPTS = ["flash-firmware", "recover-device", "collect-logs"]
+
+EXPECTED_TEMPLATES = [
+    "flashkey://logs/{project}",
+    "flashkey://logs/{project}/{file}",
+]
 
 _FAILURES: list[str] = []
 
@@ -353,11 +361,11 @@ def test_auth_middleware_no_hardware() -> None:
     try:
         initialize_server(proc)
 
-        # Send tools/call for flashkey_boot_set (requires auth + hardware)
+        # Send tools/call for boot_set (requires auth + hardware)
         result = send_request(
             proc,
             "tools/call",
-            {"name": "flashkey_boot_set", "arguments": {"value": True}},
+            {"name": "boot_set", "arguments": {"value": True}},
             request_id=3,
         )
 
@@ -530,6 +538,32 @@ def test_resources_list_and_read() -> None:
         stop_server(proc)
 
 
+# ── Test 8b: Resource templates ────────────────────────────────────────
+
+def test_resource_templates_list() -> None:
+    """resources/templates/list exposes the historical-log templates."""
+    proc = start_server()
+    try:
+        initialize_server(proc)
+
+        result = send_request(proc, "resources/templates/list", request_id=14)
+        assert "result" in result, f"No 'result': {result}"
+        templates = result["result"]["resourceTemplates"]
+        uris = [t["uriTemplate"] for t in templates]
+        assert set(EXPECTED_TEMPLATES) <= set(uris), (
+            f"Missing templates: {set(EXPECTED_TEMPLATES) - set(uris)}"
+        )
+
+        print(
+            f"  test_resource_templates_list ✅  "
+            f"({len(templates)} templates)"
+        )
+    except Exception as exc:
+        _fail(f"test_resource_templates_list FAILED: {exc}")
+    finally:
+        stop_server(proc)
+
+
 # ── Test 9: Prompts ─────────────────────────────────────────────────────
 
 def test_prompts_list_and_get() -> None:
@@ -565,12 +599,30 @@ def test_prompts_list_and_get() -> None:
         messages = rendered["result"]["messages"]
         assert len(messages) == 2
         texts = " ".join(m["content"]["text"] for m in messages)
-        assert "flashkey_list_ports" in texts
+        assert "list_ports" in texts
         assert "fk_log" in texts
         assert "921600" in texts
         assert 'chip="ai-wb2"' in texts
         assert "Ai-WB2" in texts
-        assert "flashkey_flash" in texts
+        assert "flash" in texts
+
+        logs = send_request(
+            proc,
+            "prompts/get",
+            {"name": "collect-logs"},
+            request_id=12,
+        )
+        assert "result" in logs, f"No 'result': {logs}"
+        log_texts = " ".join(
+            m["content"]["text"] for m in logs["result"]["messages"]
+        )
+        assert "log_open" in log_texts
+        assert "log_close" in log_texts
+        assert "flashkey://log" in log_texts
+        assert "分析" in log_texts
+        assert "log_dump" in log_texts
+        assert "project" in log_texts
+        assert "flashkey://logs" in log_texts
 
         print(
             f"  test_prompts_list_and_get ✅  "
@@ -615,11 +667,39 @@ def test_dynamic_resources_offline_safe() -> None:
         assert "ports" in ports_data
         assert isinstance(ports_data["ports"], list)
 
-        print("  test_dynamic_resources_offline_safe ✅  JSON resources readable")
+        log_resource = send_request(
+            proc,
+            "resources/read",
+            {"uri": "flashkey://log"},
+            request_id=13,
+        )
+        assert "result" in log_resource, f"No 'result': {log_resource}"
+        assert isinstance(log_resource["result"]["contents"][0]["text"], str)
+
+        print(
+            "  test_dynamic_resources_offline_safe ✅  "
+            "status/ports/log resources readable"
+        )
     except Exception as exc:
         _fail(f"test_dynamic_resources_offline_safe FAILED: {exc}")
     finally:
         stop_server(proc)
+
+
+# ── Test 11: flash_guide returns the standard procedure (no hardware) ──
+
+def test_flash_guide_tool() -> None:
+    """flash_guide returns the full flashing procedure for the chip."""
+    from flashkey_mcp.server import _tool_flash_guide
+
+    result = _tool_flash_guide(chip="ai-wb2")
+    assert result["ok"] is True
+    assert result["chip"] == "bl602"
+    assert "list_ports" in result["guide"]
+    assert "fk_log" in result["guide"]
+    assert "921600" in result["guide"]
+    assert "flash(" in result["guide"]
+    print("  test_flash_guide_tool ✅")
 
 
 # ── Runner ──────────────────────────────────────────────────────────────
@@ -633,14 +713,16 @@ def run_all() -> None:
         ("Server Import", test_server_import),
         ("Server has main()", test_server_has_main),
         ("JSON-RPC Initialize", test_jsonrpc_initialize),
-        ("tools/list (28 tools)", test_tools_list),
+        ("tools/list (30 tools)", test_tools_list),
         ("Uninitialized Rejected", test_uninitialized_rejected),
         ("Auth Middleware (no HW)", test_auth_middleware_no_hardware),
         ("Garbage Input", test_garbage_input),
         ("Unknown Tool", test_unknown_tool),
         ("Resources list/read", test_resources_list_and_read),
+        ("Resource templates", test_resource_templates_list),
         ("Prompts list/get", test_prompts_list_and_get),
         ("Dynamic Resources (offline)", test_dynamic_resources_offline_safe),
+        ("flash_guide tool", test_flash_guide_tool),
     ]
 
     print("=" * 64)

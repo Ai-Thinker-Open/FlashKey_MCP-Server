@@ -1,7 +1,7 @@
 # flashkey-mcp 发版流程
 
 每次发布新版本都会**同时携带 FlashKey FK-01 的 CH32V203 固件（hex）**，
-`flashkey_firmware_check` / `flashkey_firmware_flash` 依赖这套流程提供"最新固件"。
+`firmware_check` / `firmware_flash` 依赖这套流程提供"最新固件"。
 
 ## 发版前
 
@@ -22,7 +22,7 @@
 
 1. 打 tag：`git tag v<包版本>`（如 `v0.1.0`），然后 `git push origin master --tags`。
 2. 在 GitHub 创建 Release：选择刚打的 tag，正文写变更日志（建议包含固件更新内容）。
-3. 发布后 `flashkey_firmware_check` 即可读到新版本
+3. 发布后 `firmware_check` 即可读到新版本
    （`releases/latest` + `raw.githubusercontent.com/<tag>/src/flashkey_mcp/firmware/firmware.json`）。
 
 ## 注意
@@ -31,4 +31,4 @@
 - OpenOCD 二进制随包内置（Linux x64 / Windows x64，来自 wch-openocd v1.6）；
   升级包时如 WCH 有新版 OpenOCD，一并更新 `src/flashkey_mcp/openocd/bin/`。
 - 首次发布必须手动创建 Release；在没有 Release 或网络不可达时，
-  `flashkey_firmware_check` 的 `latest_*` 字段返回 null，不会报错。
+  `firmware_check` 的 `latest_*` 字段返回 null，不会报错。

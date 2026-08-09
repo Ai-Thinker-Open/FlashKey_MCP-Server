@@ -257,7 +257,7 @@ class DeviceManager:
         raise RuntimeError(ERR_NO_DEVICE)
 
     # ------------------------------------------------------------------
-    # flashkey_status (no auth required)
+    # status (no auth required)
     # ------------------------------------------------------------------
 
     def get_status(self) -> dict:

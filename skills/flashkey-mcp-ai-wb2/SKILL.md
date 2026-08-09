@@ -1,6 +1,6 @@
 ---
 name: flashkey-mcp-ai-wb2
-description: FlashKey FK-01 — Ai-WB2 (BL602) 串口打断烧录。flashkey_flash_monitor、Ai-Thinker-WB2 SDK。
+description: FlashKey FK-01 — Ai-WB2 (BL602) 串口打断烧录。Ai-Thinker-WB2 SDK。
 ---
 
 # FlashKey FK-01 — Ai-WB2 烧录指南
@@ -18,12 +18,12 @@ BL602 使用**串口打断**方式进入 bootloader：烧录工具 `bflb_iot_too
 ## 烧录方式一：串口打断（默认，make flash）
 
 ```
-flashkey_flash(
+flash(
     firmware_path="/path/to/helloworld.bin",
     flash_port="/dev/ttyUSB0",
     chip="bl602",
     baud_rate=921600,
-    sdk_path="/path/to/sdk/app"
+    flash_dir="/path/to/sdk/app"
 )
 ```
 
@@ -38,23 +38,27 @@ flashkey_flash(
 `make eflash` 不会重新编译，只执行烧录。需要模组先进入 ISP 模式（BOOT 拉高 + RST 脉冲）。
 
 ```
-flashkey_flash(
+flash(
     firmware_path="/path/to/helloworld.bin",
     flash_port="/dev/ttyUSB0",
     chip="bl602",
     baud_rate=921600,
-    sdk_path="/path/to/sdk/app",
+    flash_dir="/path/to/sdk/app",
     mode="isp",
-    tool="make -C {sdk_path} eflash p={port} b={baud}"
+    tool="make -C {flash_dir} eflash p={port} b={baud}"
 )
 ```
 
-或用 `flashkey_flash_monitor` 手动控制：
+自定义烧录命令直接用 `flash` 的 `tool` 参数（支持 {port}/{baud}/{firmware}/{chip} 占位符）：
 
 ```
-flashkey_flash_monitor(
-    command="make -C <sdk_path>/app eflash p=/dev/ttyUSB0 b=921600",
-    sdk_path="<sdk_path>/app"
+flash(
+    firmware_path="/path/to/helloworld.bin",
+    flash_port="<list_ports() 中 role=fk_log 的端口>",
+    chip="ai-wb2",
+    mode="isp",
+    flash_dir="<flash_dir>/app",
+    tool="make -C {flash_dir} eflash p={port} b={baud}"
 )
 ```
 
@@ -70,7 +74,9 @@ flashkey_flash_monitor(
 ## 烧录后验证
 
 ```
-flashkey_log(port="/dev/ttyUSB0", duration=5, grep="Booting")
+log_open(port="/dev/ttyUSB0", baud_rate=115200)
+log_close()
+# 读取 flashkey://log 查看启动日志
 ```
 
 正常启动日志包含 `Booting BL602...` 或 `[OS] Starting`。

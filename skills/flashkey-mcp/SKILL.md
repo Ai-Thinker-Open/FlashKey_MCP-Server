@@ -26,7 +26,8 @@ description: FlashKey FK-01 MCP 插件 — BL602/BL616/BL618 烧录调试 + FK-0
 
 **唯一正确的做法：通过 MCP 工具。**
 
-MCP 工具可用时 → 直接用 `flashkey_status()` / `flashkey_flash()` / `flashkey_log()`。
+MCP 工具可用时 → 直接用 `status()` / `flash()` /
+`log_open()` + `log_close()`。
 
 MCP 工具不可用时 → 执行下面的安装配置流程，然后告知用户重启。**不要写脚本绕过去。**
 
@@ -34,17 +35,17 @@ MCP 工具不可用时 → 执行下面的安装配置流程，然后告知用�
 
 ## ⚠️ 关键：FK-01 有两个串口，绝对不能搞混
 
-FlashKey FK-01 是双芯片设备，插上后系统会出现**两个**串口。**调用 `flashkey_flash()` 或 `flashkey_log()` 前，必须先调 `flashkey_list_ports()`，根据返回的 `role` 字段选择端口，不要根据设备名猜测。**
+FlashKey FK-01 是双芯片设备，插上后系统会出现**两个**串口。**调用 `flash()` 或 `log_open()` 前，必须先调 `list_ports()`，根据返回的 `role` 字段选择端口，不要根据设备名猜测。**
 
 | role | VID/PID | 用途 |
 |------|---------|------|
 | `fk_control` | 1A86:FE0D | **FK-01 主控** — 仅 MCP 内部使用 |
-| `fk_log` | 1A86:8010 | **WCH-LinkE VCP 日志/烧录口**（最高 921600）— `flashkey_flash()` / `flashkey_log()` / `flashkey_send()` 用这个 |
+| `fk_log` | 1A86:8010 | **WCH-LinkE VCP 日志/烧录口**（最高 921600）— `flash()` / `log_open()` / `send()` 用这个 |
 | `unknown` | 其他 | 非 FlashKey 设备，忽略 |
 
 不同系统上设备名不同（Linux: `/dev/ttyACMx` `/dev/ttyUSBx`，Windows: `COMx`，macOS: `/dev/cu.*`），所以**不要猜名字，看 `role` 字段**。
 
-`flashkey_flash` 和 `flashkey_log` 内置了端口校验 — 传错端口会立即报错并提示正确端口名。
+`flash` 和 `log_open` 内置了端口校验 — 传错端口会立即报错并提示正确端口名。
 
 ---
 
@@ -52,7 +53,7 @@ FlashKey FK-01 是双芯片设备，插上后系统会出现**两个**串口。*
 
 ### 先检查 MCP 工具是否可用
 
-**直接用 AI 工具的原生 function call 调用 `flashkey_status()`**。不要用 shell 命令、不要 ps 查进程、不要检查配置文件。
+**直接用 AI 工具的原生 function call 调用 `status()`**。不要用 shell 命令、不要 ps 查进程、不要检查配置文件。
 
 - 调用成功 → MCP 已连接。**直接跳到步骤 3。**
 - 返回 `tool not found` / `unknown tool` → MCP 未连接，继续步骤 1 检查服务状态。
@@ -173,26 +174,32 @@ tail -f /tmp/flashkey-mcp.log          # 查看文件日志
 
 ### 3a. 先确认设备状态
 
-调用 `flashkey_status()` 确认 `authed: true`。DeviceManager 在 MCP 连接建立时自动启动，FK-01 插入后 5 秒内自动握手。
+调用 `status()` 确认 `authed: true`。DeviceManager 在 MCP 连接建立时自动启动，FK-01 插入后 5 秒内自动握手。
 
 ### 3b. 烧录
 
 ```
-flashkey_flash(firmware_path="/path/to/firmware.bin", flash_port="fk_log端口", chip="bl616")
+flash(firmware_path="/path/to/firmware.bin", flash_port="fk_log端口", chip="bl616")
 ```
 
 ### 3c. 查看日志
 
 ```
-flashkey_log(port="同上端口", duration=5, grep="Hello World")
+log_open(port="同上端口", baud_rate=115200, project="<项目名>")  # 后台开始监控，立即返回
+# 可继续执行其他工具，如复位、发指令等
+log_close()                                 # 关闭并释放串口
+# 读取资源 flashkey://log 获取本次日志
+# 历史日志自动归档到 ~/flashkey-logs/<项目名>/（每项目 10 份，可用 flashkey://logs/<项目名> 列出）
+# 如需长期保存：log_dump(dest_path="~/logs/boot.txt")
 ```
 
-如果不启动：`flashkey_rst_pulse(50)` + `flashkey_log()`。
+如果不启动：`rst_pulse(50)`，然后 `log_open()` → 操作 →
+`log_close()` → 读取 `flashkey://log`。
 
 ### 3d. 发送串口数据
 
 ```
-flashkey_send(port="fk_log端口", data="AT\r\n", read_response=True)
+send(port="fk_log端口", data="AT\r\n", read_response=True)
 ```
 
 - **encoding="text"** (默认): 字符串作为 UTF-8 发送，`\n` `\r` `\t` 转义可用
@@ -202,19 +209,20 @@ flashkey_send(port="fk_log端口", data="AT\r\n", read_response=True)
 
 示例：
 ```
-flashkey_send(port="/dev/ttyUSB0", data="AT+UART_CUR=115200,8,1,0,0\r\n", read_response=True)
-flashkey_send(port="/dev/ttyUSB0", data="48656C6C6F0D0A", encoding="hex")
+send(port="/dev/ttyUSB0", data="AT+UART_CUR=115200,8,1,0,0\r\n", read_response=True)
+send(port="/dev/ttyUSB0", data="48656C6C6F0D0A", encoding="hex")
 ```
 
 ---
 
 ## 步骤 3：烧录 + 日志
 
-当 `flashkey_status()` 返回 `authed: true` 后：
+当 `status()` 返回 `authed: true` 后：
 
-**调用 `flashkey_flash()` 一键烧录**，FK-01 自动处理时序和恢复。
+**调用 `flash()` 一键烧录**，FK-01 自动处理时序和恢复。
 
-**烧录后**：`flashkey_log(port, duration=5)` 验证启动日志。
+**烧录后**：`log_open(port, baud_rate=115200)` → `log_close()` →
+读取 `flashkey://log` 验证启动日志。
 
 ---
 
@@ -225,7 +233,7 @@ FK-01 主控芯片是 CH32V203。升级其固件需要 **WCH-LinkE 调试器**�
 
 ### 4a. 先检查更新
 
-调用 `flashkey_firmware_check()`（无需认证）：
+调用 `firmware_check()`（无需认证）：
 
 - `update_available: true` → 有比设备当前更新的固件，进入 4b
 - `package_update_available: true` → 需要先升级 flashkey-mcp 包才能拿到新 hex
@@ -244,7 +252,7 @@ FK-01 主控芯片是 CH32V203。升级其固件需要 **WCH-LinkE 调试器**�
 ### 4c. 触发烧录
 
 ```python
-flashkey_firmware_flash(confirm=True)
+firmware_flash(confirm=True)
 ```
 
 - `hex_path`：默认烧包内内置 hex；可传自定义路径
@@ -256,7 +264,7 @@ flashkey_firmware_flash(confirm=True)
 
 自动解锁重试仍失败时，工具会返回指引：在 **Windows 主机**上运行
 **WCH-LinkUtility** → 连接 WCH-LinkE → 选择 **Unlock** 解除保护 →
-重新执行 `flashkey_firmware_flash(confirm=True)`。
+重新执行 `firmware_flash(confirm=True)`。
 
 > OpenOCD（WCH v1.6，Linux x64 / Windows x64）已随 flashkey-mcp 包内置，
 > 无需单独安装；可用环境变量 `FLASHKEY_OPENOCD` 覆盖。
@@ -277,12 +285,12 @@ flashkey_firmware_flash(confirm=True)
 ## 通用故障排查
 
 ```
-flashkey_flash() 失败
-├─ flashkey_status() 先检查 authed / boot / rst 状态
+flash() 失败
+├─ status() 先检查 authed / boot / rst 状态
 ├─ authed: false → 拔出 FK-01 重新插入，等 5 秒
-├─ "make: No rule" → sdk_path 不对
+├─ "make: No rule" → flash_dir 不对
 ├─ fk_log 被占用 → 关闭串口监视器
-├─ 烧录成功但不启动 → flashkey_rst_pulse(50) + flashkey_log(port, duration=5)
+├─ 烧录成功但不启动 → rst_pulse(50) + log_open/close + 读 flashkey://log
 └─ 芯片特定问题 → 加载对应芯片子 skill
 ```
 
@@ -290,7 +298,7 @@ flashkey_flash() 失败
 
 - **Windows COM10+**：必须写 `\\.\COM10`
 - **WSL**：FK-01 + WCH-Link 需要 `usbipd` 映射
-- **串口互斥**：`flashkey_log`、`flashkey_send` 和 `flashkey_flash` 共用 fk_log
+- **串口互斥**：`log_open`、`send` 和 `flash` 共用 fk_log
 - **v5v 反直觉**：`v5v_set(True)` = PB1 LOW = 开启 5V
 - **vusb 反直觉**：`vusb_set(True)` = PA0 LOW = 开启外置 USB-A 电源（拉低启动，拉高关闭）
 

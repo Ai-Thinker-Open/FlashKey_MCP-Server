@@ -444,7 +444,7 @@ class ModuleRegistry:
         }
 
     # ------------------------------------------------------------------
-    # Info for flashkey_module_info / flashkey_status
+    # Info for module_info / status
     # ------------------------------------------------------------------
 
     def info(self) -> dict[str, Any]:

@@ -16,7 +16,7 @@ FlashKey FK-01 是安信可（Ai-Thinker）推出的双芯片 USB 烧录调试�
 - 🔘 控制 BOOT / RST 引脚与 5V / 3.3V / VUSB 电源
 - 🔄 升级 FK-01 自身 CH32V203 固件（OpenOCD + WCH-LinkE）
 
-插入 FK-01 后自动握手，5 秒内完成；`flashkey_status()` 统一状态查询无需认证，开箱即用。
+插入 FK-01 后自动握手，5 秒内完成；`status()` 统一状态查询无需认证，开箱即用。
 
 > 源码仓库：[Ai-Thinker-Open/FlashKey_MCP-Server](https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server)
 
@@ -132,22 +132,24 @@ Settings → MCP → Add new MCP server：
 
 #### MiMo Code
 
-```bash
-mimo mcp add flashkey-mcp --transport sse --url http://127.0.0.1:8100/sse
-```
+写入全局配置 `~/.config/mimocode/mimocode.jsonc`（或项目根目录 `mimocode.json`）：
 
-或项目根目录 `mimocode.json`：
-
-```json
+```jsonc
 {
+  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
   "mcp": {
     "flashkey-mcp": {
-      "type": "sse",
-      "url": "http://127.0.0.1:8100/sse"
+      "type": "remote",
+      "url": "http://127.0.0.1:8100/sse",
+      "enabled": true
     }
   }
 }
 ```
+
+> MiMo 的 `type` 只支持 `local` / `remote`：连接本地 SSE 必须用 `type: "remote"` 并填 `/sse` 端点（MiMo 会先尝试 Streamable HTTP，失败后自动回退到 SSE 传输）。**不要**用 `type: "local"` + `command: ["flashkey-mcp", "--sse"]`——那会再拉起一个独立服务进程，MiMo 按 stdio 等待握手会报 `Connection closed`。
+
+配置后运行 `mimo mcp list` 验证，应显示 `flashkey-mcp connected`。
 
 #### Codex (OpenAI)
 
@@ -168,7 +170,7 @@ codex mcp add flashkey-mcp --url http://127.0.0.1:8100/mcp
 
 - 空闲秒数可用环境变量调整：`FLASHKEY_IDLE_TIMEOUT=60 flashkey-mcp`
 - 设为 `0` 禁用空闲释放（一直保持连接，旧行为）
-- 空闲期间 `flashkey_status()` 返回 `idle: true`
+- 空闲期间 `status()` 返回 `idle: true`
 - 烧录、日志采集等长操作期间不会释放串口
 
 ### 兼容旧方式：stdio（单会话）
@@ -185,7 +187,7 @@ flashkey-mcp --version
 flashkey-mcp --service status
 
 # 配置验证：重启 AI 工具后，在对话中调用
-flashkey_status()
+status()
 ```
 
 ---
@@ -197,7 +199,7 @@ flashkey_status()
 在 AI 工具对话中调用：
 
 ```
-flashkey_status()
+status()
 ```
 
 返回 FK-01 的认证状态、固件版本、引脚状态与扩展模块信息。
@@ -205,39 +207,46 @@ flashkey_status()
 ### 示例 2：一键烧录固件
 
 ```
-flashkey_flash(firmware_path="/path/to/firmware.bin", chip="ai-wb2", flash_port="ttyACM1")
+flash(firmware_path="/path/to/firmware.bin", chip="ai-wb2", flash_port="ttyACM1")
 ```
 
-> ⚠️ 端口选择：先调用 `flashkey_list_ports()` 查看端口列表，选择 `role=fk_log` 的端口；**不能**使用 `role=fk_control` 的端口（那是 FK-01 主控口，MCP 内部专用）。
+> ⚠️ 端口选择：先调用 `list_ports()` 查看端口列表，选择 `role=fk_log` 的端口；**不能**使用 `role=fk_control` 的端口（那是 FK-01 主控口，MCP 内部专用）。
 
 ### 示例 3：采集目标芯片日志
 
 ```
-flashkey_log(port="ttyACM1", baud_rate=115200, duration=5, grep="ERROR")
+log_open(port="ttyACM1", baud_rate=115200, project="my_app")  # 后台开始监控，立即返回
+rst_pulse(50)                               # 可继续执行其他工具
+log_close()                                 # 关闭并释放串口
+# 读取资源 flashkey://log 获取本次日志
+# 如需长期保存：log_dump(dest_path="~/logs/boot.txt") 转存到文件
+# log_close 已自动归档：~/flashkey-logs/my_app/，每项目最多 10 份，超出覆盖最旧
 ```
 
 ---
 
 ## 工作原理
 
-FlashKey FK-01 是双芯片 USB 烧录调试器。MCP 插件提供 28 个工具：
+FlashKey FK-01 是双芯片 USB 烧录调试器。MCP 插件提供 31 个工具：
 
 ```
-flashkey_status()          ← 统一状态，无需认证
-flashkey_list_ports()      ← 列出所有串口
-flashkey_recover()         ← 一站式恢复（USB 重挂载 + 重新握手）
+status()          ← 统一状态，无需认证
+list_ports()      ← 列出所有串口
+recover()         ← 一站式恢复（USB 重挂载 + 重新握手）
 
-flashkey_flash()           ← 一键烧录 Ai-WB2/Ai-M62
-flashkey_log()             ← 采集目标芯片日志
-flashkey_firmware_check()  ← 检查 FK-01 自身固件是否有更新
-flashkey_firmware_flash()  ← 烧录 FK-01 自身 CH32V203 固件（OpenOCD + WCH-LinkE）
+flash()           ← 一键烧录 Ai-WB2/Ai-M62
+flash_guide()     ← 烧录前先调用，返回标准烧录流程（几乎所有 AI Agent 可见）
+log_open() / log_close()  ← 后台日志采集 + 关闭
+log_dump()        ← 把最近一次日志转存为本地文件
+firmware_check()  ← 检查 FK-01 自身固件是否有更新
+firmware_flash()  ← 烧录 FK-01 自身 CH32V203 固件（OpenOCD + WCH-LinkE）
 
-flashkey_boot_set/get()    ← BOOT 引脚控制
-flashkey_rst_set/get/pulse()  ← RST 引脚控制
-flashkey_v5v_set/get()     ← 5V 电源
-flashkey_v3v3_set/get()    ← 3.3V 电源
-flashkey_enter_bootloader()   ← 组合进入 ISP 模式
-flashkey_ping() / flashkey_get_version() / flashkey_get_uid()
+boot_set/get()    ← BOOT 引脚控制
+rst_set/get/pulse()  ← RST 引脚控制
+v5v_set/get()     ← 5V 电源
+v3v3_set/get()    ← 3.3V 电源
+enter_bootloader()   ← 组合进入 ISP 模式
+ping() / get_version() / get_uid()
 ```
 
 插入 FK-01 后自动握手，5 秒内完成。
@@ -258,30 +267,59 @@ MCP 服务通过 **resources** 提供权威参考数据，通过 **prompts** 提
 | `flashkey://docs/error-codes` | 错误码权威表（与 README 错误码表同源） |
 | `flashkey://status` | 实时设备状态（动态 JSON，离线时含 `error` 字段） |
 | `flashkey://ports` | 实时串口列表，含 `role` 字段（动态 JSON） |
+| `flashkey://log` | 最近一次日志监控采集到的串口日志（文本，覆盖式） |
+
+### Resource Templates（历史日志）
+
+| 模板 | 用途 |
+| --- | --- |
+| `flashkey://logs/{project}` | 列出某项目的全部历史日志（JSON，最多 10 份） |
+| `flashkey://logs/{project}/{file}` | 读取某项目下指定历史日志的完整内容 |
+
+`log_open(..., project="<项目名>")` 采集、`log_close()` 关闭后，日志会自动归档到
+`~/flashkey-logs/<项目名>/flashkey-log-<时间>.txt`（目录可用 `FLASHKEY_LOG_HISTORY_DIR`
+覆盖）。每个项目最多保留 **10 份**，超出自动删除最旧的一份；新一次 `log_open()` 仍会
+覆盖临时日志 `flashkey://log`，历史归档不受影响。
 
 ### Prompts
+
+> MCP 的 prompts 由客户端按需触发（MiMo 中表现为斜杠命令），AI Agent 不会自动调用；
+> Agent 自动遵循烧录流程靠的是注入的 server instructions 与工具描述（与
+> `flashkey://docs/*` 资源同源），两者都已内嵌“先 list_ports 选 fk_log、禁止硬编码端口、
+> 普通烧录用 flash”的约束。
+
+> 跨客户端通用做法：烧录前先调用 **`flash_guide(chip)`** 工具获取标准流程（工具对
+> 所有支持 MCP 的客户端可见、可调用），再把本仓库的 `AGENTS.md` 复制到你的烧录工程
+> 根目录，Codex / Claude Code / Cursor / MiMo / Cline 等都会把流程规则注入系统提示。
 
 | Prompt | 用途 |
 | --- | --- |
 | `flash-firmware` | 生成烧录步骤：选 `fk_log` → 认证 → 按 chip 默认参数烧录 → 验证 |
 | `recover-device` | 根据错误码输出恢复决策树 |
-| `collect-logs` | 生成日志采集步骤 |
+| `collect-logs` | 生成日志采集步骤（AI 读取后自行分析日志判定运行情况） |
 
 ### Ai-WB2 / Ai-M62 正确用法摘要
 
-- 先 `flashkey_list_ports()`，选择 `role=fk_log`（WCH-LinkE VCP）的端口，
-  **绝不**使用 `role=fk_control`，也不要按端口名猜测。
+- 先 `list_ports()`，选择 `role=fk_log`（WCH-LinkE VCP）的端口，
+  **绝不**使用 `role=fk_control`，也不要按端口名猜测或硬编码
+  （`/dev/ttyACM0` / `COM3` 在不同系统/插拔顺序下会变）。
+- 普通烧录只调用 `flash(firmware_path, chip, flash_port)`；自定义烧录命令
+  （如 `make eflash`）直接用 `flash` 的 `tool` 参数（支持 `{port}`/`{baud}`/
+  `{firmware}`/`{chip}` 占位符），无需额外的低层工具。
 - `chip="ai-wb2"` 默认 **break** / `baud_rate=921600`（`make flash`）：串口打断烧录，
   只烧 App、不烧 boot2；固件不支持串口打断或执行过 `make erase_flash` 时，
   改用 `mode="isp"` + `make eflash`（全量含 boot2，BOOT↑ + RST 进入 ISP）。
-- `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=2000000`。
-- 烧录后必须验证：`flashkey_log()` 观察启动日志，或 AT 模组发送 `AT+GMR`。
+- `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=921600`
+  （FlashKey 自带串口最高仅支持 921600；`2000000` 仅在外接 USB-UART 时可用）。
+- 烧录后必须验证：`log_open()` → 其他操作 → `log_close()`，
+  再读取 `flashkey://log` 观察启动日志，并**自行分析日志判定启动是否正常**
+  （有异常先排查，不要只转述日志原文），或 AT 模组发送 `AT+GMR`。
 
 ---
 
 ## FK-01 自身固件升级（CH32V203）
 
-`flashkey_firmware_check()` 检查设备当前固件版本、安装包内置固件版本与已安装插件版本，并与 GitHub 最新 Release 对比；`flashkey_firmware_flash()` 通过 WCH-LinkE（SDI）烧录 CH32V203（默认烧包内内置 hex，也可传 `hex_path`）。
+`firmware_check()` 检查设备当前固件版本、安装包内置固件版本与已安装插件版本，并与 GitHub 最新 Release 对比；`firmware_flash()` 通过 WCH-LinkE（SDI）烧录 CH32V203（默认烧包内内置 hex，也可传 `hex_path`）。
 
 ⚠️ 烧录前置条件：把 FlashKey 自带的 WCH-LinkE 通过 USB 接入电脑，并将 SWDIO/SWCLK/GND/3V3 接到 CH32V203 的 SWD 接口且目标板上电；WSL 环境需先 `usbip attach`。烧录需要显式传 `confirm=True`；普通烧录失败且疑似读保护/写保护时，工具会自动用带 unlock 的全片擦除+烧录重试一次，仍失败会提示用 Windows 主机的 **WCH-LinkUtility** 手动解锁。
 
@@ -297,7 +335,7 @@ A: 需要先把 USB 设备附加进 WSL（如 `usbip attach -r 127.0.0.1 -b <bus
 
 **Q: 烧录时选错端口？**
 
-A: 先调用 `flashkey_list_ports()`，务必选择 `role=fk_log` 的端口（WCH-LinkE VCP）；`role=fk_control` 是 FK-01 主控口，不可用于烧录或日志。
+A: 先调用 `list_ports()`，务必选择 `role=fk_log` 的端口（WCH-LinkE VCP）；`role=fk_control` 是 FK-01 主控口，不可用于烧录或日志。
 
 **Q: 烧录失败并提示读保护/写保护？**
 

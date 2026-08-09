@@ -21,12 +21,14 @@ import argparse
 import atexit
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +51,7 @@ def _validate_flash_port(port: str) -> None:
       - ``fk_control`` (VID=1A86, PID=FE0D) → FK-01 main controller, MCP only.
       - ``fk_log``     (VID=1A86, PID=8010) → WCH-LinkE VCP on v0.1.1, log/flash use this.
 
-    Always use ``flashkey_list_ports()`` and match by ``role`` field.
+    Always use ``list_ports()`` and match by ``role`` field.
     """
     import serial.tools.list_ports as _list_ports
     for p in _list_ports.comports():
@@ -67,11 +69,31 @@ def _validate_flash_port(port: str) -> None:
                     E.PORT_WRONG_ROLE,
                     f"{port} 是 FK-01 主控端口 (role=fk_control, MCP 内部专用)，"
                     f"不能用于烧录或日志。{hint}",
-                    hint="请用 flashkey_list_ports() 按 role 字段选择端口",
-                    recovery_tool="flashkey_list_ports",
+                    hint="请用 list_ports() 按 role 字段选择端口",
+                    recovery_tool="list_ports",
                 )
             return  # port found, not FK-01 control — OK
     # Port not found in system — let the actual serial open fail naturally
+
+
+_FK_LOG_MAX_BAUD = 921600
+
+
+def _validate_baud_for_port(port: str, baud_rate: int) -> None:
+    """FlashKey 自带串口 (role=fk_log) 最高仅支持 921600，更高需外接 USB-UART。"""
+    if baud_rate <= _FK_LOG_MAX_BAUD:
+        return
+    import serial.tools.list_ports as _list_ports
+
+    for p in _list_ports.comports():
+        if p.device == port and p.vid == 0x1A86 and p.pid == 0x8010:
+            raise FlashkeyError(
+                E.INVALID_ARG,
+                f"{port} 是 FlashKey 自带串口 (role=fk_log)，最高仅支持 921600，"
+                f"不能使用 {baud_rate}。",
+                hint="把 baud_rate 降到 ≤921600，或改用外接 USB-UART 串口",
+            )
+
 
 # ── Singleton device manager ─────────────────────────────────────────
 _dm: DeviceManager | None = None
@@ -79,6 +101,38 @@ _module_registry = ModuleRegistry()
 # Flash/log mutual exclusion lock (per serial port)
 _flash_lock = threading.Lock()
 _flash_active_port: str = ""
+
+# ── log_open / log_close session state ──────────────
+_LOG_MAX_LINES = 10_000
+_LOG_FILE = Path(tempfile.gettempdir()) / "flashkey-log.txt"
+_LOG_HISTORY_DIR = Path(
+    os.environ.get("FLASHKEY_LOG_HISTORY_DIR", str(Path.home() / "flashkey-logs"))
+)
+_LOG_HISTORY_MAX = max(1, int(os.environ.get("FLASHKEY_LOG_HISTORY_MAX", "10")))
+_PROJECT_SAFE_RE = re.compile(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+")
+
+
+def _sanitize_project(project: str) -> str:
+    """把项目名清洗成安全目录名（允许中文/字母/数字/_-，去掉路径分隔符）。"""
+    cleaned = _PROJECT_SAFE_RE.sub("_", project or "").strip("_")
+    return cleaned or "default"
+
+
+_log_session_lock = threading.RLock()
+_log_session: dict[str, Any] = {
+    "open": False,
+    "port": "",
+    "baud_rate": 115200,
+    "project": "default",
+    "serial": None,
+    "thread": None,
+    "stop_event": None,
+    "started_at": 0.0,
+    "ended_at": 0.0,
+    "lines": deque(maxlen=_LOG_MAX_LINES),
+    "bytes": 0,
+    "error": "",
+}
 
 
 def _get_dm() -> DeviceManager:
@@ -163,7 +217,7 @@ def _require_fk():
             "设备未连接，请插入 FlashKey FK-01",
             hint="插入 FK-01 并等待握手；WSL 下先确认 usbip 已挂载",
             retryable=True,
-            recovery_tool="flashkey_status / flashkey_list_ports",
+            recovery_tool="status / list_ports",
         )
     return dm, fk
 
@@ -183,20 +237,20 @@ def _tool_module_info() -> dict:
 # Tool implementations  (NO DeviceManager parameter in signatures!)
 # ======================================================================
 
-# ── flashkey_status (NEW, no auth required) ──────────────────────────
+# ── status (NEW, no auth required) ──────────────────────────
 
 def _tool_status() -> dict:
     """Get unified device status — always callable, no auth needed."""
     return _get_dm().get_status()
 
 
-# ── flashkey_list_ports (NEW, no auth required) ──────────────────────
+# ── list_ports (NEW, no auth required) ──────────────────────
 
 def _tool_list_ports() -> dict:
     """List all available serial ports on the system."""
     return {"ports": list_all_ports()}
 
-# ── flashkey_recover (NEW, no auth required) ─────────────────────────
+# ── recover (NEW, no auth required) ─────────────────────────
 
 def _usbipd_reattach_fk() -> list[str]:
     """Best-effort WSL usbipd re-attach of FK-01 / WCH-LinkE USB devices.
@@ -253,16 +307,16 @@ def _tool_recover(reattach: bool = False) -> dict:
     except Exception as exc:
         raise FlashkeyError(
             E.HANDSHAKE_FAILED, f"恢复握手失败: {exc}",
-            hint="检查 USB 链路后重试 flashkey_recover",
+            hint="检查 USB 链路后重试 recover",
             retryable=True,
-            recovery_tool="flashkey_recover",
+            recovery_tool="recover",
         ) from exc
     status = dm.get_status()
     hints: list[str] = []
     if not result.get("connected"):
         hints.append(
             "设备未就绪：确认 FK-01 已插入；WSL 下先 usbip attach，"
-            "再调 flashkey_recover(reattach=True)"
+            "再调 recover(reattach=True)"
         )
     elif not result.get("authed"):
         hints.append("设备已连接但未认证：完成密钥认证后重试")
@@ -278,19 +332,19 @@ def _tool_recover(reattach: bool = False) -> dict:
 
 
 
-# ── flashkey_ping ────────────────────────────────────────────────────
+# ── ping ────────────────────────────────────────────────────
 
 def _tool_ping() -> dict:
     _, fk = _require_fk()
     return fk.commands.ping()
 
 
-# ── flashkey_auth_status (DEPRECATED) ────────────────────────────────
+# ── auth_status (DEPRECATED) ────────────────────────────────
 
 def _tool_auth_status() -> dict:
     _, fk = _require_fk()
     result = fk.commands.auth_status()
-    result["_deprecated"] = "请使用 flashkey_status() 代替"
+    result["_deprecated"] = "请使用 status() 代替"
     return result
 
 
@@ -366,7 +420,7 @@ def _tool_get_uid() -> dict:
     _, fk = _require_fk()
     return {"uid": fk.commands.get_uid()}
 
-# ── flashkey_get_events (v0.1.1) ─────────────────────────────────────
+# ── get_events (v0.1.1) ─────────────────────────────────────
 
 def _tool_get_events(limit: int = 20) -> dict:
     """Return recorded device events (e.g. manual PB8/PB9 button operations)."""
@@ -376,13 +430,13 @@ def _tool_get_events(limit: int = 20) -> dict:
     return {"count": len(events), "events": events}
 
 
-# ── flashkey_get_status (DEPRECATED — use flashkey_status) ──────────
+# ── get_status (DEPRECATED — use status) ──────────
 
 def _tool_get_status() -> dict:
     _, fk = _require_fk()
     result = fk.commands.get_status()
     result["authed"] = 1
-    result["_deprecated"] = "请使用 flashkey_status() 代替"
+    result["_deprecated"] = "请使用 status() 代替"
     return result
 
 
@@ -394,7 +448,7 @@ def _tool_enter_bootloader() -> dict:
 
 
 # ======================================================================
-# flashkey_flash (NEW) — 需求三
+# flash (NEW) — 需求三
 # ======================================================================
 
 # Register cleanup hook for process kill during flash
@@ -424,7 +478,7 @@ atexit.register(_flash_atexit_cleanup)
 def _flash_break_mode(
     fk: Any,
     flash_cmd: list[str],
-    sdk_path: str,
+    flash_dir: str,
     flash_timeout: int = 120,
 ) -> tuple[bool, list[str]]:
     """BL602 serial break mode: run flash tool → detect prompt → RST pulse.
@@ -459,7 +513,7 @@ def _flash_break_mode(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=sdk_path if sdk_path else None,
+            cwd=flash_dir if flash_dir else None,
         )
 
         prompt_seen = _threading.Event()
@@ -537,9 +591,9 @@ def _tool_flash(
     firmware_path: str,
     flash_port: str,
     chip: str = "ai-m62",
-    baud_rate: int = 2000000,
+    baud_rate: int = 921600,
     tool: str = "",
-    sdk_path: str = "",
+    flash_dir: str = "",
     mode: str = "",
 ) -> dict:
     """Single-call flash workflow.
@@ -558,9 +612,9 @@ def _tool_flash(
     FK-01 handles BOOT/RST timing.  The actual firmware write is delegated
     to an external tool::
 
-        BL602 break: ``make -C <sdk_path> flash p=<port> b=<baud>``
-        BL602 isp:   ``make -C <sdk_path> eflash p=<port> b=<baud>``
-        BL616:  ``make -C <sdk_path> flash CHIP=bl616 COMX=<port> BAUDRATE=<baud_rate>``
+        BL602 break: ``make -C <flash_dir> flash p=<port> b=<baud>``
+        BL602 isp:   ``make -C <flash_dir> eflash p=<port> b=<baud>``
+        BL616:  ``make -C <flash_dir> flash CHIP=bl616 COMX=<port> BAUDRATE=<baud_rate>``
         BL618:  same as BL616 with CHIP=bl618
 
     This is a **blocking** call.  Depending on firmware size, it may
@@ -581,6 +635,7 @@ def _tool_flash(
 
     # Reject FK-01 control port — must use fk_log (WCH-LinkE VCP)
     _validate_flash_port(flash_port)
+    _validate_baud_for_port(flash_port, baud_rate)
 
     fw_path = Path(firmware_path).expanduser().resolve()
     if not fw_path.is_file():
@@ -593,10 +648,10 @@ def _tool_flash(
 
     # -- Resolve flash tool command ----------------------------------
     flash_cmd = _resolve_flash_tool(
-        chip, tool, sdk_path, flash_port, baud_rate, fw_path, mode,
+        chip, tool, flash_dir, flash_port, baud_rate, fw_path, mode,
     )
 
-    # -- Acquire flash lock (mutual exclusion with flashkey_log) ------
+    # -- Acquire flash lock (mutual exclusion with log monitoring) ------
     if not _flash_lock.acquire(blocking=False):
         raise FlashkeyError(
             E.PORT_BUSY, "烧录进行中，请等待当前烧录完成后再试",
@@ -614,7 +669,7 @@ def _tool_flash(
         _flash_cleanup_dm = dm
 
         try:
-            success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path)
+            success, output_lines = _flash_break_mode(fk, flash_cmd, flash_dir)
         finally:
             _flash_cleanup_needed = False
             try:
@@ -654,7 +709,7 @@ def _tool_flash(
                 capture_output=True,
                 text=True,
                 timeout=120,
-                cwd=sdk_path if sdk_path else None,
+                cwd=flash_dir if flash_dir else None,
             )
             if proc.stdout:
                 output_lines.append(proc.stdout)
@@ -690,8 +745,8 @@ def _tool_flash(
 
 _FLASH_BAUD_MAP: dict[str, int] = {
     "bl602": 921600,
-    "bl616": 2000000,
-    "bl618": 2000000,
+    "bl616": 921600,
+    "bl618": 921600,
 }
 
 _FLASH_MAKE_ARGS_MAP: dict[str, str] = {
@@ -708,7 +763,7 @@ _FLASH_MAKE_ISP_ARGS_MAP: dict[str, str] = {
 def _resolve_flash_tool(
     chip: str,
     tool: str,
-    sdk_path: str,
+    flash_dir: str,
     flash_port: str,
     baud_rate: int,
     fw_path: Path,
@@ -718,7 +773,7 @@ def _resolve_flash_tool(
 
     Priority:
     1. User-supplied ``tool`` (run as-is with args substitued)
-    2. ``make flash`` / ``make eflash`` from SDK (if ``sdk_path`` is set)
+    2. ``make flash`` / ``make eflash`` from SDK (if ``flash_dir`` is set)
     3. same from current directory (if Makefile has the target)
     4. Error with install instructions
     """
@@ -735,7 +790,7 @@ def _resolve_flash_tool(
         return _build_custom_cmd(tool, chip, flash_port, baud_rate, fw_path)
 
     # -- 2. make flash / make eflash from SDK --------------------------
-    make_dir = sdk_path or "."
+    make_dir = flash_dir or "."
     makefile = Path(make_dir) / "Makefile"
 
     if makefile.is_file():
@@ -763,26 +818,29 @@ def _resolve_flash_tool(
     if chip == "bl602" and mode == "isp":
         raise FlashkeyError(
             E.INVALID_ARG,
-            "未找到 Ai-WB2 ISP 烧录工具（make eflash）。请克隆 Ai-Thinker-WB2 SDK 并设置 sdk_path，"
+            "未找到 Ai-WB2 ISP 烧录工具（make eflash）。请克隆 Ai-Thinker-WB2 SDK，"
+            "把 flash_dir 指向烧录工程目录（如 <sdk>/app），"
             "或通过 tool 参数指定烧录命令。\n"
             "SDK: https://github.com/Ai-Thinker-Open/Ai-Thinker-WB2",
-            hint="设置 sdk_path 或通过 tool 参数指定 make eflash 命令",
+            hint="设置 flash_dir 为烧录工程目录，或通过 tool 参数指定 make eflash 命令",
         )
     elif chip == "bl602":
         raise FlashkeyError(
             E.INVALID_ARG,
-            "未找到 Ai-WB2 烧录工具（make flash）。请克隆 Ai-Thinker-WB2 SDK 并设置 sdk_path，"
+            "未找到 Ai-WB2 烧录工具（make flash）。请克隆 Ai-Thinker-WB2 SDK，"
+            "把 flash_dir 指向烧录工程目录（如 <sdk>/app），"
             "或通过 tool 参数指定烧录命令。\n"
             "SDK: https://github.com/Ai-Thinker-Open/Ai-Thinker-WB2",
-            hint="设置 sdk_path 或通过 tool 参数指定烧录命令",
+            hint="设置 flash_dir 为烧录工程目录，或通过 tool 参数指定烧录命令",
         )
     else:
         raise FlashkeyError(
             E.INVALID_ARG,
-            f"未找到 {chip.upper()} 烧录工具。请克隆 Bouffalo SDK 并设置 sdk_path，"
+            f"未找到 {chip.upper()} 烧录工具。请克隆 Bouffalo SDK，"
+            f"把 flash_dir 指向烧录工程目录，"
             f"或通过 tool 参数指定烧录命令。\n"
             "SDK: https://github.com/bouffalolab/bouffalo_sdk",
-            hint="设置 sdk_path 或通过 tool 参数指定烧录命令",
+            hint="设置 flash_dir 为烧录工程目录，或通过 tool 参数指定烧录命令",
         )
 
 
@@ -806,90 +864,350 @@ def _build_custom_cmd(
 
 
 # ======================================================================
-# flashkey_log (NEW) — 需求四
+# log_open / log_close — 后台日志监控
 # ======================================================================
 
-def _tool_log(
-    port: str,
-    baud_rate: int = 115200,
-    duration: int = 2,
-    max_lines: int = 50,
-    grep: str | None = None,
-) -> dict:
-    """Capture serial log output from the target chip.
-
-    Opens *port* (the WCH-LinkE VCP used for flashing/logging),
-    reads for *duration* seconds, optionally filters with *grep*, and
-    truncates to *max_lines* lines.
-    """
-    import serial as pyserial
-
-    # Reject FK-01 control port
-    _validate_flash_port(port)
-
-    # Mutual exclusion with flashkey_flash on the same port
-    if _flash_lock.locked() and _flash_active_port == port:
-        raise FlashkeyError(
-            E.PORT_BUSY, "烧录进行中，串口正忙，请等待烧录完成",
-            hint="等待烧录结束后重试",
-            retryable=True,
-        )
-
-    duration = min(max(duration, 1), 30)  # clamp 1–30 s (NFR-4)
-    max_lines = max(max_lines, 1)
-
-    actual_duration: float = 0.0
-    lines: list[str] = []
-
+def _log_reader(
+    ser: Any,
+    stop_event: threading.Event,
+    session: dict[str, Any],
+) -> None:
+    """后台读取 fk_log 串口，追加写入日志文件并保留最近 N 行。"""
     try:
-        ser = pyserial.Serial(port=port, baudrate=baud_rate, timeout=0.1)
-    except Exception as exc:
-        raise FlashkeyError(
-            E.PORT_BUSY, f"无法打开串口 {port}: {exc}",
-            hint="确认设备已插入且没有其他程序占用该串口；WSL 下先 usbip attach",
-            retryable=True,
-        )
-
-    try:
-        ser.reset_input_buffer()
-        deadline = time.monotonic() + duration
-        while time.monotonic() < deadline:
+        while not stop_event.is_set():
             try:
                 data = ser.readline()
             except Exception:
                 break
-            if data:
-                try:
-                    line = data.decode("utf-8", errors="replace").rstrip("\r\n")
-                except Exception:
-                    line = str(data)
-                lines.append(line)
-        actual_duration = duration
-    finally:
-        ser.close()
+            if not data:
+                continue
+            try:
+                line = data.decode("utf-8", errors="replace").rstrip("\r\n")
+            except Exception:
+                line = str(data)
+            if not line:
+                continue
+            session["lines"].append(line)
+            session["bytes"] += len(data)
+            try:
+                with _LOG_FILE.open("a", encoding="utf-8", errors="replace") as f:
+                    f.write(line + "\n")
+            except Exception:
+                pass
+    except Exception as exc:
+        session["error"] = f"{type(exc).__name__}: {exc}"
 
-    # Apply grep filter (case-insensitive substring match)
-    if grep and grep.strip():
-        grep_lower = grep.strip().lower()
-        lines = [ln for ln in lines if grep_lower in ln.lower()]
 
-    # Truncate to max_lines (filter first, then take last N)
-    truncated = len(lines) > max_lines
-    if truncated:
-        lines = lines[-max_lines:]
+def _tool_log_open(port: str, baud_rate: int = 115200, project: str = "") -> dict:
+    """Open fk_log serial and start background log capture (non-blocking)."""
+    import serial as pyserial
 
-    content = "\n".join(lines) if lines else "(无日志输出)"
+    global _flash_active_port
+
+    project = _sanitize_project(project)
+    _validate_flash_port(port)
+    _validate_baud_for_port(port, baud_rate)
+
+    with _log_session_lock:
+        if _log_session["open"]:
+            raise FlashkeyError(
+                E.PORT_BUSY,
+                f"日志监控已开启（{_log_session['port']}），请先调用 log_close()",
+                hint="先调用 log_close() 关闭当前监控",
+            )
+
+        if not _flash_lock.acquire(blocking=False):
+            raise FlashkeyError(
+                E.PORT_BUSY,
+                "烧录或其他串口操作进行中，暂时无法打开日志监控",
+                hint="等待当前烧录/串口操作结束，或先 recover()",
+                retryable=True,
+            )
+
+        try:
+            ser = pyserial.Serial(port=port, baudrate=baud_rate, timeout=0.1)
+        except Exception as exc:
+            _flash_lock.release()
+            raise FlashkeyError(
+                E.PORT_BUSY, f"无法打开串口 {port}: {exc}",
+                hint="确认设备已插入且没有其他程序占用该串口；WSL 下先 usbip attach",
+                retryable=True,
+            ) from exc
+
+        try:
+            _LOG_FILE.write_text("", encoding="utf-8")
+        except Exception as exc:
+            ser.close()
+            _flash_lock.release()
+            raise FlashkeyError(
+                E.INTERNAL, f"无法初始化日志文件 {_LOG_FILE}: {exc}",
+                hint="检查临时目录可写性后重试",
+            ) from exc
+
+        _flash_active_port = port
+        stop_event = threading.Event()
+        _log_session.update(
+            open=True,
+            port=port,
+            baud_rate=baud_rate,
+            project=project,
+            serial=ser,
+            stop_event=stop_event,
+            started_at=time.monotonic(),
+            ended_at=0.0,
+            lines=deque(maxlen=_LOG_MAX_LINES),
+            bytes=0,
+            error="",
+        )
+        thread = threading.Thread(
+            target=_log_reader,
+            args=(ser, stop_event, _log_session),
+            daemon=True,
+            name="fk-log-reader",
+        )
+        _log_session["thread"] = thread
+        thread.start()
 
     return {
-        "lines": len(lines),
-        "duration": round(actual_duration, 1),
-        "truncated": truncated,
-        "content": content,
+        "ok": True,
+        "monitoring": True,
+        "port": port,
+        "baud_rate": baud_rate,
+        "project": project,
+        "log_resource": "flashkey://log",
+    }
+
+
+def _prune_log_history(project: str) -> int:
+    """每个项目最多保留 _LOG_HISTORY_MAX 份日志，超出删除最旧的。"""
+    try:
+        dest_dir = _LOG_HISTORY_DIR / project
+        files = sorted(
+            dest_dir.glob("flashkey-log-*.txt"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        removed = 0
+        while len(files) > _LOG_HISTORY_MAX:
+            files[0].unlink(missing_ok=True)
+            files.pop(0)
+            removed += 1
+        return removed
+    except Exception as exc:
+        logger.warning("Failed to prune log history for %s: %s", project, exc)
+        return 0
+
+
+def _newest_archive_text() -> str:
+    """读取整个历史目录里最新一份归档日志的内容（用于去重）。"""
+    try:
+        candidates = [
+            p
+            for p in _LOG_HISTORY_DIR.glob("*/flashkey-log-*.txt")
+            if p.is_file()
+        ]
+        if not candidates:
+            return ""
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        return newest.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _archive_orphan_log() -> dict:
+    """log_close 无会话时，把临时日志文件补归档（防重启/SIGKILL 丢失，去重）。"""
+    try:
+        text = _LOG_FILE.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return {"archived": False, "reason": "无日志文件"}
+    if not text.strip():
+        return {"archived": False, "reason": "无日志内容"}
+    if _newest_archive_text() == text:
+        return {"archived": False, "reason": "已归档过"}
+    return _archive_log("default", text.splitlines())
+
+
+def _archive_log(project: str, lines: list[str]) -> dict:
+    """把本次日志归档到 ~/flashkey-logs/<project>/，每项目最多保留 10 份。"""
+    try:
+        text = "\n".join(lines)
+        if not text.strip():
+            return {"archived": False, "reason": "无日志内容"}
+        text += "\n"  # 与 flashkey://log 的落盘格式保持一致
+        dest_dir = _LOG_HISTORY_DIR / project
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        base = f"flashkey-log-{time.strftime('%Y%m%d-%H%M%S')}"
+        dest = dest_dir / f"{base}.txt"
+        n = 1
+        while dest.exists():  # 同一秒多次关闭避免覆盖
+            dest = dest_dir / f"{base}-{n}.txt"
+            n += 1
+        dest.write_text(text, encoding="utf-8")
+        removed = _prune_log_history(project)
+        return {
+            "archived": True,
+            "path": str(dest.resolve()),
+            "bytes": len(text.encode("utf-8")),
+            "lines": len(lines),
+            "removed_old": removed,
+        }
+    except Exception as exc:
+        logger.warning("Failed to archive log for project %s: %s", project, exc)
+        return {"archived": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _tool_log_close() -> dict:
+    """Stop background log capture, close serial and finalize flashkey://log."""
+    global _flash_active_port
+
+    with _log_session_lock:
+        if not _log_session["open"]:
+            result = {"ok": True, "monitoring": False, "message": "未在监控"}
+            recovery = _archive_orphan_log()
+            if recovery.get("archived"):
+                result["archive"] = recovery
+            return result
+
+        stop_event = _log_session["stop_event"]
+        if stop_event is not None:
+            stop_event.set()
+        thread = _log_session["thread"]
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        ser = _log_session["serial"]
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception as exc:
+                logger.warning("Failed to close log serial: %s", exc)
+
+        lines = list(_log_session["lines"])
+        total_bytes = _log_session["bytes"]
+        try:
+            with _LOG_FILE.open("w", encoding="utf-8", errors="replace") as f:
+                for line in lines:
+                    f.write(line + "\n")
+        except Exception as exc:
+            logger.warning("Failed to finalize log file: %s", exc)
+
+        duration = time.monotonic() - _log_session["started_at"]
+        port = _log_session["port"]
+        baud_rate = _log_session["baud_rate"]
+        project = _log_session.get("project", "default")
+        error = _log_session["error"]
+        archive = _archive_log(project, lines)
+
+        _log_session.update(
+            open=False,
+            port="",
+            baud_rate=115200,
+            project="default",
+            serial=None,
+            thread=None,
+            stop_event=None,
+            started_at=0.0,
+            ended_at=time.monotonic(),
+            lines=deque(maxlen=_LOG_MAX_LINES),
+            bytes=0,
+            error="",
+        )
+        _flash_active_port = ""
+        try:
+            _flash_lock.release()
+        except RuntimeError:
+            pass  # 防御：锁已被其他路径释放时避免崩溃
+
+        result = {
+            "ok": True,
+            "monitoring": False,
+            "port": port,
+            "baud_rate": baud_rate,
+            "project": project,
+            "archive": archive,
+            "duration_s": round(duration, 2),
+            "lines": len(lines),
+            "bytes": total_bytes,
+            "log_resource": "flashkey://log",
+        }
+        if error:
+            result["error"] = error
+        return result
+
+
+def _shutdown_archive_log() -> None:
+    """服务退出时若日志监控仍开启，先归档本次日志（防重启丢失）。"""
+    global _flash_active_port
+    try:
+        with _log_session_lock:
+            if not _log_session["open"]:
+                return
+            lines = list(_log_session["lines"])
+            project = _log_session.get("project", "default")
+            archive = _archive_log(project, lines)
+            logger.info("Shutdown log archive for %s: %s", project, archive)
+            try:
+                with _LOG_FILE.open("w", encoding="utf-8", errors="replace") as f:
+                    for line in lines:
+                        f.write(line + "\n")
+            except Exception:
+                pass
+            _log_session["open"] = False
+            _flash_active_port = ""
+            try:
+                _flash_lock.release()
+            except RuntimeError:
+                pass
+    except Exception:
+        logger.exception("Failed to archive log on shutdown")
+
+
+def _tool_log_dump(dest_path: str = "") -> dict:
+    """把最近一次采集的日志转存到本地文件（不触碰串口，无需认证）。"""
+    try:
+        text = _LOG_FILE.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        text = ""
+    except Exception as exc:
+        raise FlashkeyError(
+            E.INVALID_ARG,
+            f"读取日志失败: {exc}",
+            hint="先调用 log_open() 采集、log_close() 关闭后再转存",
+        )
+    if not text.strip():
+        return {
+            "success": False,
+            "message": "暂无日志，请先 log_open() 采集并 log_close() 后再转存",
+            "path": "",
+            "bytes": 0,
+            "lines": 0,
+        }
+
+    if dest_path:
+        dest = Path(dest_path).expanduser()
+    else:
+        dest = Path.home() / "flashkey-logs" / (
+            f"flashkey-log-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        )
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        raise FlashkeyError(
+            E.INVALID_ARG,
+            f"写入日志文件失败: {exc}",
+            hint=f"检查目标路径是否可写，或换一个路径，如 {Path.home() / 'flashkey-logs'}",
+        )
+
+    return {
+        "success": True,
+        "path": str(dest.resolve()),
+        "bytes": len(text.encode("utf-8")),
+        "lines": text.count("\n"),
+        "message": f"日志已转存到 {dest}",
     }
 
 
 # ======================================================================
-# flashkey_send (NEW) — 串口数据发送
+# send (NEW) — 串口数据发送
 # ======================================================================
 
 
@@ -925,8 +1243,9 @@ def _tool_send(
 
     # Reject FK-01 control port
     _validate_flash_port(port)
+    _validate_baud_for_port(port, baud_rate)
 
-    # Mutual exclusion with flashkey_flash on the same port
+    # Mutual exclusion with flash on the same port
     if _flash_lock.locked() and _flash_active_port == port:
         raise FlashkeyError(
             E.PORT_BUSY, "烧录进行中，串口正忙，请等待烧录完成",
@@ -1046,7 +1365,7 @@ mcp = FastMCP(
 # Status & discovery (no auth required)
 mcp.add_tool(
     _tool_wrapper(_tool_status, require_auth=False),
-    name="flashkey_status",
+    name="status",
     description=(
         "查询 FlashKey FK-01 统一状态。不需要认证，始终可调用。"
         "返回认证状态(authed)、是否空闲释放串口(idle)、固件版本(version)、"
@@ -1056,7 +1375,7 @@ mcp.add_tool(
 )
 mcp.add_tool(
     _tool_wrapper(_tool_list_ports, require_auth=False),
-    name="flashkey_list_ports",
+    name="list_ports",
     description=(
         "列出系统所有可用串口。每项包含 port、description、VID、PID、role。\n"
         "role=fk_control → FK-01 主控口 (MCP 内部使用，不能用于烧录/日志)\n"
@@ -1067,7 +1386,7 @@ mcp.add_tool(
 )
 mcp.add_tool(
     _tool_wrapper(_tool_recover, require_auth=False),
-    name="flashkey_recover",
+    name="recover",
     description=(
         "🛠 一站式恢复：可选 USB 重挂载 + 强制重新握手。无需认证，工具失败时优先调用。\n"
         "参数:\n"
@@ -1078,7 +1397,7 @@ mcp.add_tool(
 )
 mcp.add_tool(
     _tool_wrapper(_tool_module_info, require_auth=False),
-    name="flashkey_module_info",
+    name="module_info",
     description=(
         "查询 FlashKey 扩展模块状态（无需认证）。"
         "返回模块是否在线(present)、模块身份(module)、已注册的 mod_* 动态工具列表(tools)、"
@@ -1089,56 +1408,56 @@ mcp.add_tool(
 # Communication
 mcp.add_tool(
     _tool_wrapper(_tool_ping),
-    name="flashkey_ping",
+    name="ping",
     description="Ping FlashKey 设备并返回 magic 标识字符串。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_auth_status),
-    name="flashkey_auth_status",
-    description="查询 FK-01 认证状态。⚠️ 已弃用(DEPRECATED)，建议使用 flashkey_status()。需要认证。",
+    name="auth_status",
+    description="查询 FK-01 认证状态。⚠️ 已弃用(DEPRECATED)，建议使用 status()。需要认证。",
 )
 
 # GPIO control
 mcp.add_tool(
     _tool_wrapper(_tool_boot_set),
-    name="flashkey_boot_set",
+    name="boot_set",
     description="设置 BOOT 引脚 (PB3) 高(value=True) 或低(value=False)。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_boot_get),
-    name="flashkey_boot_get",
+    name="boot_get",
     description="读取 BOOT 引脚 (PB3) 当前状态。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_rst_set),
-    name="flashkey_rst_set",
+    name="rst_set",
     description="设置 RST 引脚 (PB4) 高(value=True) 或低(value=False)。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_rst_get),
-    name="flashkey_rst_get",
+    name="rst_get",
     description="读取 RST 引脚 (PB4) 当前状态。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_rst_pulse),
-    name="flashkey_rst_pulse",
+    name="rst_pulse",
     description="在 RST 引脚上产生指定毫秒(ms)的负脉冲，默认 50ms。需要认证。",
 )
 
 # Power control
 mcp.add_tool(
     _tool_wrapper(_tool_v5v_set),
-    name="flashkey_v5v_set",
+    name="v5v_set",
     description="控制 5V 电源输出 (PB13, 低电平有效)，value=True 开启。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_v5v_get),
-    name="flashkey_v5v_get",
+    name="v5v_get",
     description="读取 5V 电源当前状态。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_vusb_set),
-    name="flashkey_vusb_set",
+    name="vusb_set",
     description=(
         "控制外置 USB-A 电源输出 (PA0, 低电平有效)：value=True 拉低 PA0 = 开启/启动，"
         "value=False 拉高 PA0 = 关闭。默认关闭。需要认证。"
@@ -1146,121 +1465,91 @@ mcp.add_tool(
 )
 mcp.add_tool(
     _tool_wrapper(_tool_vusb_get),
-    name="flashkey_vusb_get",
+    name="vusb_get",
     description="读取外置 USB-A 电源当前状态 (True=开启/PA0低, False=关闭/PA0高)。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_v3v3_set),
-    name="flashkey_v3v3_set",
+    name="v3v3_set",
     description="控制 3.3V 电源输出 (PB0, 高电平有效)，value=True 开启。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_v3v3_get),
-    name="flashkey_v3v3_get",
+    name="v3v3_get",
     description="读取 3.3V 电源当前状态。需要认证。",
 )
 
-# ── flashkey_flash_monitor ─────────────────────────────────────────
+# ── flash_guide（烧录前学习流程）─────────────────────────────────────
 
-def _tool_flash_monitor(
-    command: str,
-    sdk_path: str = "",
-    flash_timeout: int = 120,
-) -> dict:
-    """Run a flash command, monitor stdout for 'Please Press Reset Key!',
-    pulse FK-01 RST to trigger bootloader, wait for completion.
-
-    This is the low-level building block for BL602 serial break mode.
-    The command runs in a subprocess, FK-01 watches stdout for the reset
-    prompt, then pulses RST at the right moment.
-
-    Args:
-        command: Shell command to run (e.g. 'make -C /path flash p=/dev/ttyUSB0 b=921600')
-        sdk_path: Working directory for the command
-        flash_timeout: Max seconds to wait (default 120)
-    """
-    dm, fk = _require_fk()
-
-    # Acquire flash lock
-    if not _flash_lock.acquire(blocking=False):
-        raise FlashkeyError(
-            E.PORT_BUSY, "烧录进行中，请等待当前烧录完成后再试",
-            hint="等待当前烧录结束后重试",
-            retryable=True,
-        )
-
-    global _flash_active_port, _flash_cleanup_needed, _flash_cleanup_dm
-    _flash_cleanup_needed = True
-    _flash_cleanup_dm = dm
-
+def _tool_flash_guide(chip: str = "ai-wb2", mode: str = "") -> dict:
+    """返回 Ai-WB2 / Ai-M62 标准烧录流程文本（无需认证，供 AI 烧录前学习）。"""
     try:
-        flash_cmd = command.split()
-        success, output_lines = _flash_break_mode(fk, flash_cmd, sdk_path, flash_timeout)
-    finally:
-        _flash_cleanup_needed = False
-        try:
-            fk.commands.rst_pulse(50)
-        except Exception as exc:
-            output_lines.append(f"[警告] 复位失败: {exc}")
-        _flash_lock.release()
-
-    return {
-        "success": success,
-        "output": "\n".join(output_lines),
-    }
+        messages = _guide._prompt_flash_firmware(
+            chip=chip,
+            firmware_path="<固件绝对路径>",
+            mode=mode,
+        )
+        guide_text = messages[1].content.text
+        return {
+            "ok": True,
+            "chip": _guide.normalize_chip(chip),
+            "guide": guide_text,
+        }
+    except Exception as exc:
+        raise FlashkeyError(
+            E.INVALID_ARG,
+            f"无法生成烧录指南: {exc}",
+            hint="chip 支持 ai-wb2 / ai-m62；mode 可选 break / isp",
+        )
 
 
 mcp.add_tool(
-    _tool_wrapper(_tool_flash_monitor),
-    name="flashkey_flash_monitor",
+    _tool_wrapper(_tool_flash_guide, require_auth=False),
+    name="flash_guide",
     description=(
-        "🔍 运行烧录命令并监控输出，检测到复位提示时自动通过 FK-01 RST 引脚复位芯片。\n"
-        "用于 Ai-WB2 串口打断烧录模式：make flash 先发 sync 信号，然后打印复位提示等待用户复位，\n"
-        "此工具自动检测提示并发送 RST 脉冲，烧录完成后再次复位使芯片正常启动。\n"
+        "📖 烧录指南：返回 Ai-WB2 / Ai-M62 的标准烧录流程文本（选端口 → 认证 → flash → 验证）。\n"
+        "烧录前必须先调用本工具学习正确流程，再按步骤执行（无需认证）。\n"
         "参数:\n"
-        "  command: 烧录命令 (如 'make -C /path flash p=/dev/ttyUSB0 b=921600')\n"
-        "  sdk_path: 命令执行的工作目录\n"
-        "  flash_timeout: 超时秒数，默认 120\n"
-        "返回: success(是否成功)、output(命令完整输出)\n"
-        "需要认证。"
+        "  chip: 模组名称，默认 ai-wb2（支持 ai-wb2 / ai-m62）\n"
+        "  mode: 可选；ai-wb2 的 break(默认)/isp\n"
+        "返回: ok、chip、guide（完整步骤文本）。"
     ),
 )
-
 # Version & UID
 mcp.add_tool(
     _tool_wrapper(_tool_get_version),
-    name="flashkey_get_version",
+    name="get_version",
     description="读取 FK-01 固件版本号 (如 '0.1.1')。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_get_uid),
-    name="flashkey_get_uid",
+    name="get_uid",
     description="读取 FK-01 设备唯一 ID (16 字符 hex 字符串)。需要认证。",
 )
 mcp.add_tool(
     _tool_wrapper(_tool_get_events, require_auth=False),
-    name="flashkey_get_events",
+    name="get_events",
     description=(
         "读取服务器已记录的 FlashKey 事件（如用户手动操作 PB8/PB9 按键），"
         "每条包含事件名、按键、动作和操作时间戳。无需认证。"
     ),
 )
 
-# Deprecated (replaced by flashkey_status)
+# Deprecated (replaced by status)
 mcp.add_tool(
     _tool_wrapper(_tool_get_status),
-    name="flashkey_get_status",
-    description="读取引脚状态。⚠️ 已弃用(DEPRECATED)，建议使用 flashkey_status()。需要认证。",
+    name="get_status",
+    description="读取引脚状态。⚠️ 已弃用(DEPRECATED)，建议使用 status()。需要认证。",
 )
 
 # Convenience
 mcp.add_tool(
     _tool_wrapper(_tool_enter_bootloader),
-    name="flashkey_enter_bootloader",
+    name="enter_bootloader",
     description=(
         "组合操作: BOOT 拉高 → RST 脉冲 → 目标芯片进入烧录模式。"
         "等效于 boot_set(True) + rst_pulse()。需要认证。\n"
-        "常见错误: AUTH_REQUIRED(先完成密钥认证)、DEVICE_NOT_FOUND(设备掉线→flashkey_recover)。"
+        "常见错误: AUTH_REQUIRED(先完成密钥认证)、DEVICE_NOT_FOUND(设备掉线→recover)。"
     ),
 )
 
@@ -1268,11 +1557,12 @@ mcp.add_tool(
 
 mcp.add_tool(
     _tool_wrapper(_tool_flash),
-    name="flashkey_flash",
+    name="flash",
     description=(
         "⚡ 一键烧录固件到目标芯片 (阻塞操作，耗时 10-120 秒)。\n"
         "\n"
-        "⚠️ 端口选择：先用 flashkey_list_ports() 查看端口列表，选择 role=fk_log (WCH-LinkE VCP) 的端口。\n"
+        "⚠️ 调用前必须先调用 list_ports() 获取当前真实端口，禁止硬编码或复用旧端口名。\n"
+        "⚠️ 端口选择：先用 list_ports() 查看端口列表，选择 role=fk_log (WCH-LinkE VCP) 的端口。\n"
         "绝对不能使用 role=fk_control 的端口（那是 FK-01 主控口，MCP 内部专用）。\n"
         "不要根据端口名猜测角色，不同系统上名字不同 (COMx / ttyACMx / ttyUSBx / cu.*)。\n"
         "注意：WCH-LinkE VCP (fk_log) 最高仅支持 921600，需要更高波特率时请用外接 USB-UART。\n"
@@ -1285,58 +1575,83 @@ mcp.add_tool(
         "  Ai-M62 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
-        "  flash_port: 烧录串口 — 必须选 flashkey_list_ports() 中 role=fk_log 的端口\n"
+        "  flash_port: 烧录串口 — 必须选 list_ports() 中 role=fk_log 的端口\n"
         "  chip: 模组名称，支持 Ai-WB2 / Ai-M62\n"
-        "  baud_rate: 烧录波特率 (Ai-WB2 默认 921600, Ai-M62 默认 2000000)\n"
+        "  baud_rate: 烧录波特率。FlashKey 自带串口 (fk_log) 最高仅支持 921600，\n"
+        "         Ai-WB2 默认 921600；Ai-M62 默认 921600（如需 2000000 必须改用外接 USB-UART）\n"
         "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 或 Ai-WB2 ISP\n"
         "         'make eflash p={port} b={baud}' 占位符)\n"
-        "  sdk_path: 可选，芯片 SDK 根目录 (用于 make flash / make eflash)\n"
+        "  flash_dir: 可选，烧录命令执行目录（包含 Makefile 的工程目录，如 Ai-WB2 SDK 的 <sdk>/app；用于 make flash / make eflash）\n"
         "  mode: 烧录模式 (break/isp)。Ai-WB2 默认 break，Ai-M62 默认 isp；Ai-WB2 ISP 使用 make eflash。"
         "需要认证。\n"
         "常见错误: PORT_WRONG_ROLE(端口选错→先用 list_ports 按 role 选 fk_log)、"
         "INVALID_ARG(chip/固件路径错→按 hint 修正)、FLASH_VERIFY_FAILED(chip 与固件不匹配→重烧)、"
-        "DEVICE_NOT_FOUND(设备掉线→flashkey_recover(reattach=True))。"
+        "DEVICE_NOT_FOUND(设备掉线→recover(reattach=True))。"
     ),
 )
 mcp.add_tool(
-    _tool_wrapper(_tool_log),
-    name="flashkey_log",
+    _tool_wrapper(_tool_log_open),
+    name="log_open",
     description=(
-        "📋 采集目标芯片串口日志 (需要认证)。\n"
-        "⚠️ 端口选择：先用 flashkey_list_ports() 查看端口列表，选择 role=fk_log (WCH-LinkE VCP) 的端口。绝对不能用 role=fk_control 的端口。\n"
+        "📂 打开目标芯片串口日志监控（需要认证，立即返回，不阻塞 AI Agent）。\n"
+        "⚠️ 端口选择：先用 list_ports() 选择 role=fk_log (WCH-LinkE VCP)，绝不能使用 fk_control。\n"
+        "开启后 server 在后台持续读取串口并写入日志文件；AI 可以继续调用 rst_pulse 等其他工具，"
+        "不必持续监控串口。\n"
+        "完成后必须调用 log_close() 关闭监控，然后读取资源 flashkey://log 获取日志。\n"
         "参数:\n"
-        "  port: 日志串口 — 必须选 flashkey_list_ports() 中 role=fk_log 的端口\n"
+        "  port: 日志串口 — role=fk_log\n"
         "  baud_rate: 日志波特率，默认 115200\n"
-        "  duration: 采集时长(秒)，默认 2，最大 30\n"
-        "  max_lines: 返回最大行数，grep 过滤后截取，默认 50\n"
-        "  grep: 过滤关键词(子串匹配，不区分大小写)，None 表示不过滤\n"
-        "返回: lines(实际行数)、duration(采集时长)、truncated(是否截断)、content(日志文本)\n"
-        "与 flashkey_flash 互斥，串口忙时返回 isError。\n"
-        "常见错误: PORT_WRONG_ROLE(端口选错→按 role 选 fk_log)、PORT_BUSY(与烧录互斥→等待结束)、"
-        "DEVICE_NOT_FOUND(设备掉线→flashkey_recover(reattach=True))。"
+        "  project: 可选；项目名（默认 default），用于历史日志归档目录名\n"
+        "返回: ok、monitoring、port、baud_rate、project、log_resource\n"
+        "与 flash / send 互斥；重复 open 返回 PORT_BUSY。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_log_close, require_auth=False),
+    name="log_close",
+    description=(
+        "🛑 关闭目标芯片串口日志监控（无需认证）。\n"
+        "停止后台读取、关闭并释放串口，把本次日志覆盖写入资源 flashkey://log。\n"
+        "同时自动归档到历史日志：~/flashkey-logs/<project>/flashkey-log-<时间>.txt，\n"
+        "每个项目最多保留 10 份，超出覆盖最旧；可用资源 flashkey://logs/{project} 列出、\n"
+        "flashkey://logs/{project}/{file} 读取。调用后 AI 应读取 flashkey://log 获取本次日志。\n"
+        "未开启监控时返回成功 no-op。\n"
+        "返回: ok、monitoring、port、baud_rate、project、archive、duration_s、lines、bytes、log_resource。"
+    ),
+)
+mcp.add_tool(
+    _tool_wrapper(_tool_log_dump, require_auth=False),
+    name="log_dump",
+    description=(
+        "📤 把最近一次采集的日志（log_open → log_close 后，即 flashkey://log 的内容）"
+        "转存到本地文件，便于长期保存与分析（无需认证，不触碰串口）。\n"
+        "参数:\n"
+        "  dest_path: 可选；目标文件路径。留空默认保存到 ~/flashkey-logs/flashkey-log-<时间戳>.txt。\n"
+        "返回: success、path、bytes、lines；暂无日志时 success=false。\n"
+        "注意: 日志来自最近一次 log_open/log_close，新的 log_open 会覆盖旧日志，请先转存再重新采集。"
     ),
 )
 mcp.add_tool(
     _tool_wrapper(_tool_send),
-    name="flashkey_send",
+    name="send",
     description=(
         "📤 向目标芯片发送串口数据 (需要认证)。\n"
-        "⚠️ 端口选择：先用 flashkey_list_ports() 查看端口列表，选择 role=fk_log (WCH-LinkE VCP) 的端口。绝对不能使用 role=fk_control 的端口。\n"
+        "⚠️ 端口选择：先用 list_ports() 查看端口列表，选择 role=fk_log (WCH-LinkE VCP) 的端口。绝对不能使用 role=fk_control 的端口。\n"
         "参数:\n"
-        "  port: 目标串口 — 必须选 flashkey_list_ports() 中 role=fk_log 的端口\n"
+        "  port: 目标串口 — 必须选 list_ports() 中 role=fk_log 的端口\n"
         "  data: 要发送的数据字符串\n"
         "  baud_rate: 波特率，默认 115200\n"
         "  encoding: 编码方式 — \"text\"(默认，支持 \\n \\r \\t 转义) 或 \"hex\"(十六进制，空格可选)\n"
         "  read_response: 发送后是否读取目标芯片的响应，默认 False\n"
         "  read_timeout: 读取响应的超时秒数，默认 1.0，最大 10.0\n"
         "返回: sent(发送字节数)、data(数据摘要)；若 read_response=True，还包含 response(响应文本)、response_lines(行数)\n"
-        "与 flashkey_flash 互斥，串口忙时返回 isError。\n"
-        "示例: flashkey_send(port=\"/dev/ttyUSB0\", data=\"AT\\r\\n\", read_response=True) 发送 AT 指令并读取响应"
+        "与 flash 互斥，串口忙时返回 isError。\n"
+        "示例: send(port=\"/dev/ttyUSB0\", data=\"AT\\r\\n\", read_response=True) 发送 AT 指令并读取响应"
     ),
 )
 
 
-# ── flashkey_firmware_check / flashkey_firmware_flash (CH32V203 self-update) ──
+# ── firmware_check / firmware_flash (CH32V203 self-update) ──
 
 def _read_device_version() -> str | None:
     """Best-effort current FK-01 firmware version; None when offline."""
@@ -1380,7 +1695,7 @@ def _tool_firmware_flash(
 
 mcp.add_tool(
     _tool_wrapper(_tool_firmware_check, require_auth=False),
-    name="flashkey_firmware_check",
+    name="firmware_check",
     description=(
         "检查 FK-01 CH32V203 固件是否有更新（无需认证）。\n"
         "返回: device_version(设备当前固件版本，离线为 null)、"
@@ -1396,7 +1711,7 @@ mcp.add_tool(
 )
 mcp.add_tool(
     _tool_wrapper(_tool_firmware_flash),
-    name="flashkey_firmware_flash",
+    name="firmware_flash",
     description=(
         "烧录 FK-01 自身 CH32V203 固件（OpenOCD + WCH-LinkE SDI，需要认证）。\n"
         "⚠️ 前置条件：把 FlashKey 自带的 WCH-LinkE 通过 USB 接入电脑，"
@@ -1411,7 +1726,7 @@ mcp.add_tool(
         "仍失败则返回 WCH-LinkUtility 手动解锁指引。\n"
         "返回: ok、before_version、after_version、unlocked_retried、"
         "output_summary、duration_s；dry_run 时含 commands。\n"
-        "常见错误: DEVICE_NOT_FOUND(WCH-LinkE 未挂载/接线→flashkey_recover(reattach=True))、"
+        "常见错误: DEVICE_NOT_FOUND(WCH-LinkE 未挂载/接线→recover(reattach=True))、"
         "FLASH_PROTECTED(已自动解锁重试，仍失败用 WCH-LinkUtility)、AUTH_REQUIRED(先认证)。"
     ),
 )
@@ -1448,11 +1763,85 @@ def _resource_ports() -> dict:
         }
 
 
+def _resource_log() -> str:
+    """读取最近一次日志监控写入的串口日志（不抛异常）。"""
+    try:
+        text = _LOG_FILE.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "(无日志)"
+    except Exception as exc:
+        return f"(日志读取失败: {exc})"
+    return text if text else "(无日志)"
+
+
+@mcp.resource(
+    "flashkey://logs/{project}",
+    name="flashkey-log-history",
+    title="历史日志列表",
+    description="指定项目的历史日志文件列表（每项目最多 10 份，超出覆盖最旧）。",
+    mime_type="application/json",
+)
+def _resource_log_history(project: str) -> dict:
+    """列出某项目的历史日志（不抛异常）。"""
+    try:
+        safe = _sanitize_project(project)
+        dest_dir = _LOG_HISTORY_DIR / safe
+        files = []
+        if dest_dir.is_dir():
+            for p in sorted(
+                dest_dir.glob("flashkey-log-*.txt"),
+                key=lambda x: x.stat().st_mtime,
+                reverse=True,
+            ):
+                files.append(
+                    {
+                        "name": p.name,
+                        "path": str(p.resolve()),
+                        "bytes": p.stat().st_size,
+                        "mtime": time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(p.stat().st_mtime)
+                        ),
+                    }
+                )
+        return {
+            "project": safe,
+            "max_files": _LOG_HISTORY_MAX,
+            "files": files,
+        }
+    except Exception as exc:
+        return {
+            "project": project,
+            "max_files": _LOG_HISTORY_MAX,
+            "files": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+@mcp.resource(
+    "flashkey://logs/{project}/{file}",
+    name="flashkey-log-history-file",
+    title="历史日志内容",
+    description="读取指定项目下某一份历史日志的完整内容。",
+    mime_type="text/plain",
+)
+def _resource_log_file(project: str, file: str) -> str:
+    """读取某份历史日志内容（防路径穿越，不抛异常）。"""
+    try:
+        dest_dir = _LOG_HISTORY_DIR / _sanitize_project(project)
+        name = Path(file).name
+        p = dest_dir / name
+        if not p.is_file():
+            return f"(未找到历史日志: {project}/{file})"
+        return p.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"(读取历史日志失败: {exc})"
+
+
 mcp.add_resource(
     TextResource(
         uri="flashkey://docs/quickstart",
         name="flashkey-docs-quickstart",
-        title="FlashKey 快速上手",
+        title="快速上手",
         description="FK-01 上手流程：查状态、选端口、认证、烧录/日志。",
         mime_type="text/markdown",
         text=_guide.QUICKSTART_DOC,
@@ -1462,7 +1851,7 @@ mcp.add_resource(
     TextResource(
         uri="flashkey://docs/flash-guide",
         name="flashkey-docs-flash-guide",
-        title="FlashKey 烧录指南",
+        title="烧录指南",
         description="Ai-WB2/Ai-M62 烧录端口选择、默认模式/波特率与验证步骤。",
         mime_type="text/markdown",
         text=_guide.FLASH_GUIDE_DOC,
@@ -1472,7 +1861,7 @@ mcp.add_resource(
     TextResource(
         uri="flashkey://docs/error-codes",
         name="flashkey-docs-error-codes",
-        title="FlashKey 错误码表",
+        title="错误码表",
         description="全部错误码的含义、下一步、是否可重试与恢复工具。",
         mime_type="text/markdown",
         text=_guide.ERROR_CODES_DOC,
@@ -1482,7 +1871,7 @@ mcp.add_resource(
     FunctionResource(
         uri="flashkey://status",
         name="flashkey-status",
-        title="FlashKey 实时状态",
+        title="实时状态",
         description="实时设备状态快照（无需认证；离线时包含 error 字段）。",
         mime_type="application/json",
         fn=_resource_status,
@@ -1492,10 +1881,20 @@ mcp.add_resource(
     FunctionResource(
         uri="flashkey://ports",
         name="flashkey-ports",
-        title="FlashKey 实时串口列表",
+        title="实时串口列表",
         description="实时串口列表（含 role 字段；异常时包含 error 字段）。",
         mime_type="application/json",
         fn=_resource_ports,
+    )
+)
+mcp.add_resource(
+    FunctionResource(
+        uri="flashkey://log",
+        name="flashkey-log",
+        title="串口日志",
+        description="最近一次 log_open/close 采集的串口日志（文本，覆盖式）。",
+        mime_type="text/plain",
+        fn=_resource_log,
     )
 )
 
@@ -1765,6 +2164,8 @@ def main() -> None:
     # Start DeviceManager immediately — by the time AI makes its first
     # tool call, FK-01 may already be discovered and handshake completed.
     _get_dm()
+    # 服务退出时若有未关闭的日志监控会话，先归档再退出（防重启丢失）
+    atexit.register(_shutdown_archive_log)
 
     if transport == "sse":
         # ── SSE mode (default) ──────────────────────────────────────

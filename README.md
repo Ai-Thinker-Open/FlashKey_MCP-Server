@@ -16,7 +16,7 @@ FlashKey FK-01 is a dual-chip USB flashing and debugging adapter from Ai-Thinker
 - 🔘 Control BOOT / RST pins and 5V / 3.3V / VUSB power
 - 🔄 Upgrade FK-01's own CH32V203 firmware (OpenOCD + WCH-LinkE)
 
-Automatic handshake within 5 seconds after plugging in the FK-01; `flashkey_status()` provides unified status without authentication, ready to use out of the box.
+Automatic handshake within 5 seconds after plugging in the FK-01; `status()` provides unified status without authentication, ready to use out of the box.
 
 > Source repository: [Ai-Thinker-Open/FlashKey_MCP-Server](https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server)
 
@@ -140,22 +140,24 @@ Settings → MCP → Add new MCP server:
 
 #### MiMo Code
 
-```bash
-mimo mcp add flashkey-mcp --transport sse --url http://127.0.0.1:8100/sse
-```
+Write to the global config `~/.config/mimocode/mimocode.jsonc` (or `mimocode.json` in the project root):
 
-Or add to `mimocode.json` in the project root:
-
-```json
+```jsonc
 {
+  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
   "mcp": {
     "flashkey-mcp": {
-      "type": "sse",
-      "url": "http://127.0.0.1:8100/sse"
+      "type": "remote",
+      "url": "http://127.0.0.1:8100/sse",
+      "enabled": true
     }
   }
 }
 ```
+
+> MiMo only supports `type: "local"` / `"remote"`: to connect to a local SSE endpoint use `type: "remote"` with the `/sse` URL (MiMo tries Streamable HTTP first, then falls back to the legacy SSE transport). Do **not** use `type: "local"` with `command: ["flashkey-mcp", "--sse"]` — that spawns a separate server process and MiMo waits for a stdio handshake that never comes (`Connection closed`).
+
+Verify with `mimo mcp list` — `flashkey-mcp` should show `connected`.
 
 #### Codex (OpenAI)
 
@@ -183,7 +185,7 @@ WSL USB remapping) while the daemon is idle:
 
 - Adjust the idle timeout with `FLASHKEY_IDLE_TIMEOUT=60 flashkey-mcp`
 - Set it to `0` to disable idle release (always keep the connection)
-- `flashkey_status()` reports `idle: true` while the port is released
+- `status()` reports `idle: true` while the port is released
 - Long operations (flash / log capture) never trigger a release
 
 ### Legacy stdio mode (single session)
@@ -202,7 +204,7 @@ flashkey-mcp --version
 flashkey-mcp --service status
 
 # Config check: restart your AI tool, then call it in a conversation
-flashkey_status()
+status()
 ```
 
 ---
@@ -214,7 +216,7 @@ flashkey_status()
 Call this in your AI tool's conversation:
 
 ```
-flashkey_status()
+status()
 ```
 
 Returns the FK-01's authentication status, firmware version, pin states, and module info.
@@ -222,39 +224,46 @@ Returns the FK-01's authentication status, firmware version, pin states, and mod
 ### Example 2: Flash firmware in one click
 
 ```
-flashkey_flash(firmware_path="/path/to/firmware.bin", chip="ai-wb2", flash_port="ttyACM1")
+flash(firmware_path="/path/to/firmware.bin", chip="ai-wb2", flash_port="ttyACM1")
 ```
 
-> ⚠️ Port selection: first call `flashkey_list_ports()` to list the ports and pick the one with `role=fk_log`; **do not** use the `role=fk_control` port (that is the FK-01 control port, reserved for the MCP server).
+> ⚠️ Port selection: first call `list_ports()` to list the ports and pick the one with `role=fk_log`; **do not** use the `role=fk_control` port (that is the FK-01 control port, reserved for the MCP server).
 
 ### Example 3: Collect target chip logs
 
 ```
-flashkey_log(port="ttyACM1", baud_rate=115200, duration=5, grep="ERROR")
+log_open(port="ttyACM1", baud_rate=115200, project="my_app")  # 后台开始监控，立即返回
+rst_pulse(50)                               # 可继续执行其他工具
+log_close()                                 # 关闭并释放串口
+# 读取资源 flashkey://log 获取本次日志
+# 如需长期保存：log_dump(dest_path="~/logs/boot.txt") 转存到文件
+# log_close 已自动归档：~/flashkey-logs/my_app/，每项目最多 10 份，超出覆盖最旧
 ```
 
 ---
 
 ## How it works
 
-FlashKey FK-01 is a dual-chip USB flashing and debugging adapter. The MCP plugin exposes 28 tools:
+FlashKey FK-01 is a dual-chip USB flashing and debugging adapter. The MCP plugin exposes 31 tools:
 
 ```
-flashkey_status()          ← unified status, no authentication required
-flashkey_list_ports()      ← list all serial ports
-flashkey_recover()         ← one-stop recovery (USB re-attach + re-handshake)
+status()          ← unified status, no authentication required
+list_ports()      ← list all serial ports
+recover()         ← one-stop recovery (USB re-attach + re-handshake)
 
-flashkey_flash()           ← one-click flashing for Ai-WB2/Ai-M62
-flashkey_log()             ← collect target chip logs
-flashkey_firmware_check()  ← check for FK-01 firmware updates
-flashkey_firmware_flash()  ← flash FK-01's own CH32V203 firmware (OpenOCD + WCH-LinkE)
+flash()           ← one-click flashing for Ai-WB2/Ai-M62
+flash_guide()     ← call before flashing; returns the standard procedure (visible to almost any AI agent)
+log_open() / log_close()  ← background log capture + close
+log_dump()        ← export the latest capture to a local file
+firmware_check()  ← check for FK-01 firmware updates
+firmware_flash()  ← flash FK-01's own CH32V203 firmware (OpenOCD + WCH-LinkE)
 
-flashkey_boot_set/get()    ← BOOT pin control
-flashkey_rst_set/get/pulse()  ← RST pin control
-flashkey_v5v_set/get()     ← 5V power
-flashkey_v3v3_set/get()    ← 3.3V power
-flashkey_enter_bootloader()   ← combined ISP-mode entry
-flashkey_ping() / flashkey_get_version() / flashkey_get_uid()
+boot_set/get()    ← BOOT pin control
+rst_set/get/pulse()  ← RST pin control
+v5v_set/get()     ← 5V power
+v3v3_set/get()    ← 3.3V power
+enter_bootloader()   ← combined ISP-mode entry
+ping() / get_version() / get_uid()
 ```
 
 Automatic handshake within 5 seconds after plugging in the FK-01.
@@ -277,30 +286,59 @@ through the injected server instructions and tool descriptions.
 | `flashkey://docs/error-codes` | 错误码权威表（与下方 README 表同源） |
 | `flashkey://status` | 实时设备状态（动态 JSON，离线时含 `error` 字段） |
 | `flashkey://ports` | 实时串口列表，含 `role` 字段（动态 JSON） |
+| `flashkey://log` | 最近一次日志监控采集到的串口日志（文本，覆盖式） |
+
+### Resource Templates（历史日志）
+
+| 模板 | 用途 |
+| --- | --- |
+| `flashkey://logs/{project}` | 列出某项目的全部历史日志（JSON，最多 10 份） |
+| `flashkey://logs/{project}/{file}` | 读取某项目下指定历史日志的完整内容 |
+
+`log_open(..., project="<项目名>")` 采集、`log_close()` 关闭后，日志会自动归档到
+`~/flashkey-logs/<项目名>/flashkey-log-<时间>.txt`（目录可用 `FLASHKEY_LOG_HISTORY_DIR`
+覆盖）。每个项目最多保留 **10 份**，超出自动删除最旧的一份；新一次 `log_open()` 仍会
+覆盖临时日志 `flashkey://log`，历史归档不受影响。
 
 ### Prompts
+
+> MCP 的 prompts 由客户端按需触发（MiMo 中表现为斜杠命令），AI Agent 不会自动调用；
+> Agent 自动遵循烧录流程靠的是注入的 server instructions 与工具描述（与
+> `flashkey://docs/*` 资源同源），两者都已内嵌“先 list_ports 选 fk_log、禁止硬编码端口、
+> 普通烧录用 flash”的约束。
+
+> 跨客户端通用做法：烧录前先调用 **`flash_guide(chip)`** 工具获取标准流程（工具对
+> 所有支持 MCP 的客户端可见、可调用），再把本仓库的 `AGENTS.md` 复制到你的烧录工程
+> 根目录，Codex / Claude Code / Cursor / MiMo / Cline 等都会把流程规则注入系统提示。
 
 | Prompt | 用途 |
 | --- | --- |
 | `flash-firmware` | 生成烧录步骤：选 `fk_log` → 认证 → 按 chip 默认参数烧录 → 验证 |
 | `recover-device` | 根据错误码输出恢复决策树 |
-| `collect-logs` | 生成日志采集步骤 |
+| `collect-logs` | 生成日志采集步骤（AI 读取后自行分析日志判定运行情况） |
 
 ### Ai-WB2 / Ai-M62 正确用法摘要
 
-- 先 `flashkey_list_ports()`，选择 `role=fk_log`（WCH-LinkE VCP）的端口，
-  **绝不**使用 `role=fk_control`，也不要按端口名猜测。
+- 先 `list_ports()`，选择 `role=fk_log`（WCH-LinkE VCP）的端口，
+  **绝不**使用 `role=fk_control`，也不要按端口名猜测或硬编码
+  （`/dev/ttyACM0` / `COM3` 在不同系统/插拔顺序下会变）。
+- 普通烧录只调用 `flash(firmware_path, chip, flash_port)`；自定义烧录命令
+  （如 `make eflash`）直接用 `flash` 的 `tool` 参数（支持 `{port}`/`{baud}`/
+  `{firmware}`/`{chip}` 占位符），无需额外的低层工具。
 - `chip="ai-wb2"` 默认 **break** / `baud_rate=921600`（`make flash`）：串口打断烧录，
   只烧 App、不烧 boot2；固件不支持串口打断或执行过 `make erase_flash` 时，
   改用 `mode="isp"` + `make eflash`（全量含 boot2，BOOT↑ + RST 进入 ISP）。
-- `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=2000000`。
-- 烧录后必须验证：`flashkey_log()` 观察启动日志，或 AT 模组发送 `AT+GMR`。
+- `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=921600`
+  （FlashKey 自带串口最高仅支持 921600；`2000000` 仅在外接 USB-UART 时可用）。
+- 烧录后必须验证：`log_open()` → 其他操作 → `log_close()`，
+  再读取 `flashkey://log` 观察启动日志，并**自行分析日志判定启动是否正常**
+  （有异常先排查，不要只转述日志原文），或 AT 模组发送 `AT+GMR`。
 
 ---
 
 ## Upgrading FK-01 firmware (CH32V203)
 
-`flashkey_firmware_check()` checks the device's current firmware version, the firmware bundled with the installed package, and the installed plugin version, comparing them with the latest GitHub release; `flashkey_firmware_flash()` flashes the CH32V203 via WCH-LinkE (SDI), using the bundled hex by default (a custom `hex_path` is also supported).
+`firmware_check()` checks the device's current firmware version, the firmware bundled with the installed package, and the installed plugin version, comparing them with the latest GitHub release; `firmware_flash()` flashes the CH32V203 via WCH-LinkE (SDI), using the bundled hex by default (a custom `hex_path` is also supported).
 
 ⚠️ Prerequisites: connect the FlashKey's built-in WCH-LinkE to your computer via USB and wire SWDIO/SWCLK/GND/3V3 to the CH32V203's SWD interface with the target powered on; in WSL you need `usbip attach` first. Flashing requires an explicit `confirm=True`. If a normal flash fails with a suspected read/write protection error, the tool automatically retries with an unlocked full-chip erase + flash; if it still fails, it will suggest manually unlocking with **WCH-LinkUtility** on a Windows host.
 
@@ -316,7 +354,7 @@ A: Attach the USB device to WSL first (e.g. `usbip attach -r 127.0.0.1 -b <bus-i
 
 **Q: I picked the wrong port for flashing?**
 
-A: First call `flashkey_list_ports()` and always pick the port with `role=fk_log` (WCH-LinkE VCP). The `role=fk_control` port is the FK-01 control port and must not be used for flashing or logging.
+A: First call `list_ports()` and always pick the port with `role=fk_log` (WCH-LinkE VCP). The `role=fk_control` port is the FK-01 control port and must not be used for flashing or logging.
 
 **Q: Flashing fails with a read/write protection error?**
 
@@ -362,7 +400,7 @@ Agent 与用户可据此判断：发生了什么、该不该直接重试、下�
 | DEVICE_NOT_FOUND | 设备未插入/未挂载 | 插入 FK-01 等待握手；WSL 先 `usbip attach`，然后重试 |
 | HANDSHAKE_FAILED | 握手失败/重连超时 | 稍候重试；检查 USB 链路 |
 | PORT_BUSY | 串口被占用/烧录进行中 | 关闭占用串口的程序，等待烧录结束再重试 |
-| PORT_WRONG_ROLE | 用错端口角色 | 用 `flashkey_list_ports()` 按 `role` 选择端口 |
+| PORT_WRONG_ROLE | 用错端口角色 | 用 `list_ports()` 按 `role` 选择端口 |
 | AUTH_REQUIRED | 需要认证 | 先完成密钥认证（SET_KEY / flashkey_auth） |
 | AUTH_FAILED | 认证失败 | 重新 SET_KEY 覆盖烧录密钥 |
 | FLASH_PROTECTED | Flash 读保护 | 服务端已自动解锁重试；仍失败用 WCH-LinkUtility 解锁 |

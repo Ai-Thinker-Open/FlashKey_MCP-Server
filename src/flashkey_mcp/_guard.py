@@ -19,7 +19,7 @@ _GUARD_MSG = (
     "║  flashkey-mcp 是 MCP 服务进程，不能直接在脚本中 import。  ║\n"
     "║                                                              ║\n"
     "║  正确做法：通过 MCP 工具调用                                 ║\n"
-    "║    flashkey_status() / flashkey_flash() / flashkey_log()     ║\n"
+    "║    status() / flash() / log_open() ║\n"
     "║                                                              ║\n"
     "║  如果需要运行测试脚本：                                      ║\n"
     "║    FLASHKEY_MCP=1 python tests/test_xxx.py                   ║\n"
@@ -37,8 +37,9 @@ def _require_mcp_runtime() -> None:
     print(_GUARD_MSG, file=sys.stderr)
     raise RuntimeError(
         "flashkey-mcp modules cannot be imported directly outside the "
-        "MCP server process. Use MCP tools (flashkey_status / "
-        "flashkey_flash / flashkey_log). Set FLASHKEY_MCP=1 for testing."
+        "MCP server process. Use MCP tools (status / "
+        "flash / log_open / log_close). "
+        "Set FLASHKEY_MCP=1 for testing."
     )
 
 

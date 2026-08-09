@@ -2,10 +2,10 @@
 
 Provides the logic behind two MCP tools:
 
-- ``flashkey_firmware_check`` — compare the device firmware version against
+- ``firmware_check`` — compare the device firmware version against
   the hex bundled with this flashkey-mcp release and the latest release
   published on GitHub.
-- ``flashkey_firmware_flash`` — write the bundled (or a user-provided) hex
+- ``firmware_flash`` — write the bundled (or a user-provided) hex
   into the FK-01 CH32V203 through the WCH-LinkE SDI interface.
 
 The WCH OpenOCD binary and target configs ship inside the wheel under
@@ -89,7 +89,7 @@ HW_PREP_MSG = (
     "（WSL 环境需先 usbip attach 到 WSL）；\n"
     "2) 将 WCH-LinkE 的 SWDIO/SWCLK/GND/3V3 接到 FK-01 CH32V203 的 SWD 接口；\n"
     "3) 确认目标板已上电。\n"
-    "接线完成后重新执行本工具；仍失败可先用 flashkey_list_ports() 确认设备在线。"
+    "接线完成后重新执行本工具；仍失败可先用 list_ports() 确认设备在线。"
 )
 
 WCH_LINKUTILITY_HINT = (
