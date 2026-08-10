@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库是 FlashKey FK-01 的 MCP 服务器插件（flashkey-mcp）。当用户要求**烧录 Ai-WB2 / Ai-M62 固件、采集日志、排查设备**时，所有支持 MCP 的客户端（Codex / Claude Code / Cursor / MiMo / Cline 等）都应遵循以下流程。
+本仓库是 FlashKey FK-01 的 MCP 服务器插件（flashkey-mcp）。当用户要求**烧录 Ai-WB2 / Ai-M62 固件、采集日志、排查设备**时，所有支持 MCP 的客户端（Codex / Claude Code / Cursor / OpenCode / Cline 等）都应遵循以下流程。
 
 ## 烧录固件（Ai-WB2 / Ai-M62）
 

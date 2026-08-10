@@ -9,7 +9,7 @@
 
 ## 项目简介
 
-FlashKey FK-01 是安信可（Ai-Thinker）推出的双芯片 USB 烧录调试器。**flashkey-mcp** 是它的 MCP（Model Context Protocol）服务器插件，让 Cline、Hermes Agent、MiMo Code 等 AI 工具可以直接控制 FK-01 完成烧录、日志采集与调试：
+FlashKey FK-01 是安信可（Ai-Thinker）推出的双芯片 USB 烧录调试器。**flashkey-mcp** 是它的 MCP（Model Context Protocol）服务器插件，让 Cline、Hermes Agent、OpenCode 等 AI 工具可以直接控制 FK-01 完成烧录、日志采集与调试：
 
 - ⚡ 一键烧录 Ai-WB2 / Ai-M62 固件
 - 📋 采集目标芯片串口日志
@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/Ai-Thinker-Open/FlashKey_MCP-Server
 2. 检测系统上的 AI 工具，自动写入对应格式的 MCP 配置
 3. 提示下一步操作
 
-**支持自动配置的工具**：Cline、Hermes Agent、MiMo Code
+**支持自动配置的工具**：Cline、Hermes Agent、OpenCode
 
 ### pip 安装（Git 源）
 
@@ -130,15 +130,15 @@ Settings → MCP → Add new MCP server：
 - 类型：`sse`
 - URL：`http://127.0.0.1:8100/sse`
 
-#### MiMo Code
+#### OpenCode
 
-写入全局配置 `~/.config/mimocode/mimocode.jsonc`（或项目根目录 `mimocode.json`）：
+写入全局配置 `~/.config/opencode/opencode.json`（或项目根目录 `opencode.json`）：
 
 ```jsonc
 {
-  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "flashkey-mcp": {
+    "flashkey": {
       "type": "remote",
       "url": "http://127.0.0.1:8100/sse",
       "enabled": true
@@ -147,9 +147,12 @@ Settings → MCP → Add new MCP server：
 }
 ```
 
-> MiMo 的 `type` 只支持 `local` / `remote`：连接本地 SSE 必须用 `type: "remote"` 并填 `/sse` 端点（MiMo 会先尝试 Streamable HTTP，失败后自动回退到 SSE 传输）。**不要**用 `type: "local"` + `command: ["flashkey-mcp", "--sse"]`——那会再拉起一个独立服务进程，MiMo 按 stdio 等待握手会报 `Connection closed`。
+> OpenCode 的 `type` 支持 `local` / `remote`：连接本地 SSE 必须用 `type: "remote"` 并填
+> `/sse` 端点（OpenCode 会先尝试 Streamable HTTP，失败后自动回退到 SSE 传输）。**不要**
+> 用 `type: "local"` + `command: ["flashkey-mcp", "--sse"]`——那会再拉起一个独立服务进程，
+> OpenCode 按 stdio 等待握手会报 `Connection closed`。
 
-配置后运行 `mimo mcp list` 验证，应显示 `flashkey-mcp connected`。
+配置后运行 `opencode mcp list` 验证，应显示 `flashkey connected`。
 
 #### Codex (OpenAI)
 
@@ -283,14 +286,14 @@ MCP 服务通过 **resources** 提供权威参考数据，通过 **prompts** 提
 
 ### Prompts
 
-> MCP 的 prompts 由客户端按需触发（MiMo 中表现为斜杠命令），AI Agent 不会自动调用；
+> MCP 的 prompts 由客户端按需触发（OpenCode 中表现为斜杠命令），AI Agent 不会自动调用；
 > Agent 自动遵循烧录流程靠的是注入的 server instructions 与工具描述（与
 > `flashkey://docs/*` 资源同源），两者都已内嵌“先 list_ports 选 fk_log、禁止硬编码端口、
 > 普通烧录用 flash”的约束。
 
 > 跨客户端通用做法：烧录前先调用 **`flash_guide(chip)`** 工具获取标准流程（工具对
 > 所有支持 MCP 的客户端可见、可调用），再把本仓库的 `AGENTS.md` 复制到你的烧录工程
-> 根目录，Codex / Claude Code / Cursor / MiMo / Cline 等都会把流程规则注入系统提示。
+> 根目录，Codex / Claude Code / Cursor / OpenCode / Cline 等都会把流程规则注入系统提示。
 
 | Prompt | 用途 |
 | --- | --- |

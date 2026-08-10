@@ -9,7 +9,7 @@
 
 ## Introduction
 
-FlashKey FK-01 is a dual-chip USB flashing and debugging adapter from Ai-Thinker. **flashkey-mcp** is its MCP (Model Context Protocol) server plugin that lets AI tools such as Cline, Hermes Agent, and MiMo Code control the FK-01 directly for flashing, log collection, and debugging:
+FlashKey FK-01 is a dual-chip USB flashing and debugging adapter from Ai-Thinker. **flashkey-mcp** is its MCP (Model Context Protocol) server plugin that lets AI tools such as Cline, Hermes Agent, and OpenCode control the FK-01 directly for flashing, log collection, and debugging:
 
 - ⚡ One-click firmware flashing for Ai-WB2 / Ai-M62
 - 📋 Collect target chip serial logs
@@ -35,7 +35,7 @@ The script will:
 2. Detect AI tools on your system and write the matching MCP configuration automatically
 3. Show you the next steps
 
-**Tools supported by automatic configuration**: Cline, Hermes Agent, MiMo Code
+**Tools supported by automatic configuration**: Cline, Hermes Agent, OpenCode
 
 ### Install via pip (from Git)
 
@@ -138,15 +138,15 @@ Settings → MCP → Add new MCP server:
 - Type: `sse`
 - URL: `http://127.0.0.1:8100/sse`
 
-#### MiMo Code
+#### OpenCode
 
-Write to the global config `~/.config/mimocode/mimocode.jsonc` (or `mimocode.json` in the project root):
+Write to the global config `~/.config/opencode/opencode.json` (or `opencode.json` in the project root):
 
 ```jsonc
 {
-  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "flashkey-mcp": {
+    "flashkey": {
       "type": "remote",
       "url": "http://127.0.0.1:8100/sse",
       "enabled": true
@@ -155,9 +155,13 @@ Write to the global config `~/.config/mimocode/mimocode.jsonc` (or `mimocode.jso
 }
 ```
 
-> MiMo only supports `type: "local"` / `"remote"`: to connect to a local SSE endpoint use `type: "remote"` with the `/sse` URL (MiMo tries Streamable HTTP first, then falls back to the legacy SSE transport). Do **not** use `type: "local"` with `command: ["flashkey-mcp", "--sse"]` — that spawns a separate server process and MiMo waits for a stdio handshake that never comes (`Connection closed`).
+> OpenCode supports `type: "local"` / `"remote"`: to connect to a local SSE endpoint use
+> `type: "remote"` with the `/sse` URL (OpenCode tries Streamable HTTP first, then falls
+> back to the legacy SSE transport). Do **not** use `type: "local"` with
+> `command: ["flashkey-mcp", "--sse"]` — that spawns a separate server process and OpenCode
+> waits for a stdio handshake that never comes (`Connection closed`).
 
-Verify with `mimo mcp list` — `flashkey-mcp` should show `connected`.
+Verify with `opencode mcp list` — `flashkey` should show `connected`.
 
 #### Codex (OpenAI)
 
@@ -303,7 +307,7 @@ still overwrites the temporary `flashkey://log`; historical archives are not aff
 
 ### Prompts
 
-> MCP prompts are triggered on demand by the client (slash commands in MiMo); the AI agent
+> MCP prompts are triggered on demand by the client (slash commands in OpenCode); the AI agent
 > does not invoke them automatically. Automatic adherence to the flashing workflow comes
 > from the injected server instructions and tool descriptions (same source as the
 > `flashkey://docs/*` resources), both of which embed “list ports first, pick `fk_log`,
@@ -311,7 +315,7 @@ still overwrites the temporary `flashkey://log`; historical archives are not aff
 
 > Cross-client practice: call the **`flash_guide(chip)`** tool before flashing (tools are
 > visible and callable in every MCP client), and copy this repo's `AGENTS.md` to your
-> flashing project root so Codex / Claude Code / Cursor / MiMo / Cline inject the workflow.
+> flashing project root so Codex / Claude Code / Cursor / OpenCode / Cline inject the workflow.
 
 | Prompt | Purpose |
 | --- | --- |

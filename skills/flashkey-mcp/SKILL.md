@@ -124,7 +124,7 @@ pip install --user git+https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server.gi
 bash setup.sh
 ```
 
-自动检测系统上的 AI 工具并写入对应配置。支持 Cline、Hermes、MiMo Code。
+自动检测系统上的 AI 工具并写入对应配置。支持 Cline、Hermes、OpenCode。
 
 ### 方式 B：手动配置
 
@@ -140,7 +140,7 @@ flashkey-mcp 是通用 MCP 服务器，任何 MCP 兼容工具都可以使用。
 |------|---------|------|
 | Cline (VS Code) | `~/.cline/mcp.json` | JSON |
 | Hermes Agent | `~/.hermes/config.yaml` | YAML |
-| MiMo Code | 项目根目录 `mimocode.json`，顶层 key 为 `"mcp"`，`"type": "local"` | JSON |
+| OpenCode | 项目根目录 `opencode.json`（或全局 `~/.config/opencode/opencode.json`），顶层 key 为 `"mcp"`，SSE 用 `"type": "remote"` + `/sse` URL | JSON |
 
 ### 方式 C：SSE 服务模式（服务独立运行，需工具支持 SSE）
 

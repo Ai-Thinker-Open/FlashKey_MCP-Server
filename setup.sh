@@ -178,28 +178,38 @@ YAMLEOF
     CONFIGURED=$((CONFIGURED + 1))
 }
 
-# ── MiMo Code ────────────────────────────────────────────────────────
-configure_mimo() {
-    # MiMo 使用项目级配置，不写全局，只在当前项目目录生效
-    local config_file="$(pwd)/mimocode.json"
-    if [ -f "$config_file" ] && grep -q 'flashkey-mcp' "$config_file" 2>/dev/null; then
-        info "MiMo Code: 已配置 (项目级 mimocode.json)"
+# ── OpenCode ────────────────────────────────────────────────────────
+configure_opencode() {
+    # OpenCode 使用项目级配置，只在当前项目目录生效
+    local config_file="$(pwd)/opencode.json"
+    if [ -f "$config_file" ] && grep -q 'flashkey' "$config_file" 2>/dev/null; then
+        info "OpenCode: 已配置 (项目级 opencode.json)"
         CONFIGURED=$((CONFIGURED + 1))
         return
     fi
-    # MiMo 的 mimocode.json 格式特殊，仅在有该工具时处理
-    if command -v mimo &>/dev/null; then
-        mimo mcp add flashkey-mcp --transport sse --url http://127.0.0.1:8100/sse 2>/dev/null && {
-            info "MiMo Code: 已添加 MCP"
-            CONFIGURED=$((CONFIGURED + 1))
-        }
+    # 仅检测到 OpenCode CLI 时写入 opencode.json（mcp 字段，remote + SSE）
+    if command -v opencode &>/dev/null; then
+        cat > "$config_file" <<'EOF'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "flashkey": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8100/sse",
+      "enabled": true
+    }
+  }
+}
+EOF
+        info "OpenCode: 已创建配置 (opencode.json)"
+        CONFIGURED=$((CONFIGURED + 1))
     fi
 }
 
 # ── 检测并配置 ────────────────────────────────────────────────────────
 configure_cline
 configure_hermes
-configure_mimo
+configure_opencode
 
 # ─── 结果 ──────────────────────────────────────────────────────────────
 
