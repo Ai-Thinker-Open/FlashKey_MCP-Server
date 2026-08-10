@@ -232,12 +232,12 @@ flash(firmware_path="/path/to/firmware.bin", chip="ai-wb2", flash_port="ttyACM1"
 ### Example 3: Collect target chip logs
 
 ```
-log_open(port="ttyACM1", baud_rate=115200, project="my_app")  # 后台开始监控，立即返回
-rst_pulse(50)                               # 烧录后验证必须复位：让模组重启，采集完整启动日志
-log_close()                                 # 关闭并释放串口
-# 读取资源 flashkey://log 获取本次日志
-# 如需长期保存：log_dump(dest_path="~/logs/boot.txt") 转存到文件
-# log_close 已自动归档：~/flashkey-logs/my_app/，每项目最多 10 份，超出覆盖最旧
+log_open(port="ttyACM1", baud_rate=115200, project="my_app")  # background capture starts, returns immediately
+rst_pulse(50)                               # post-flash verification: must reboot the module to capture the full boot log
+log_close()                                 # close and release the serial port
+# read resource flashkey://log for this capture
+# to keep it long-term: log_dump(dest_path="~/logs/boot.txt")
+# log_close already archives to ~/flashkey-logs/my_app/ (max 10 per project, oldest is replaced)
 ```
 
 ---
@@ -279,60 +279,64 @@ through the injected server instructions and tool descriptions.
 
 ### Resources
 
-| URI | 内容 |
+| URI | Content |
 | --- | --- |
-| `flashkey://docs/quickstart` | 上手流程：查状态 → 选端口 → 认证 → 烧录/日志 |
-| `flashkey://docs/flash-guide` | 烧录指南：端口角色、chip 默认模式/波特率、烧后验证 |
-| `flashkey://docs/error-codes` | 错误码权威表（与下方 README 表同源） |
-| `flashkey://status` | 实时设备状态（动态 JSON，离线时含 `error` 字段） |
-| `flashkey://ports` | 实时串口列表，含 `role` 字段（动态 JSON） |
-| `flashkey://log` | 最近一次日志监控采集到的串口日志（文本，覆盖式） |
+| `flashkey://docs/quickstart` | Quick start: status → pick port → auth → flash/log |
+| `flashkey://docs/flash-guide` | Flash guide: port roles, per-chip default mode/baud, post-flash verification |
+| `flashkey://docs/error-codes` | Authoritative error-code table (same source as the README table below) |
+| `flashkey://status` | Live device status (dynamic JSON; includes `error` when offline) |
+| `flashkey://ports` | Live serial-port list with `role` field (dynamic JSON) |
+| `flashkey://log` | Latest log capture (text, overwritten on the next capture) |
 
-### Resource Templates（历史日志）
+### Resource Templates (historical logs)
 
-| 模板 | 用途 |
+| Template | Purpose |
 | --- | --- |
-| `flashkey://logs/{project}` | 列出某项目的全部历史日志（JSON，最多 10 份） |
-| `flashkey://logs/{project}/{file}` | 读取某项目下指定历史日志的完整内容 |
+| `flashkey://logs/{project}` | List all historical logs for a project (JSON, up to 10) |
+| `flashkey://logs/{project}/{file}` | Read the full content of a specific historical log |
 
-`log_open(..., project="<项目名>")` 采集、`log_close()` 关闭后，日志会自动归档到
-`~/flashkey-logs/<项目名>/flashkey-log-<时间>.txt`（目录可用 `FLASHKEY_LOG_HISTORY_DIR`
-覆盖）。每个项目最多保留 **10 份**，超出自动删除最旧的一份；新一次 `log_open()` 仍会
-覆盖临时日志 `flashkey://log`，历史归档不受影响。
+Capturing with `log_open(..., project="<project>")` and closing with `log_close()`
+automatically archives logs to `~/flashkey-logs/<project>/flashkey-log-<timestamp>.txt`
+(the directory can be overridden with `FLASHKEY_LOG_HISTORY_DIR`). Each project keeps at
+most **10** files; the oldest is removed when the cap is exceeded. A new `log_open()`
+still overwrites the temporary `flashkey://log`; historical archives are not affected.
 
 ### Prompts
 
-> MCP 的 prompts 由客户端按需触发（MiMo 中表现为斜杠命令），AI Agent 不会自动调用；
-> Agent 自动遵循烧录流程靠的是注入的 server instructions 与工具描述（与
-> `flashkey://docs/*` 资源同源），两者都已内嵌“先 list_ports 选 fk_log、禁止硬编码端口、
-> 普通烧录用 flash”的约束。
+> MCP prompts are triggered on demand by the client (slash commands in MiMo); the AI agent
+> does not invoke them automatically. Automatic adherence to the flashing workflow comes
+> from the injected server instructions and tool descriptions (same source as the
+> `flashkey://docs/*` resources), both of which embed “list ports first, pick `fk_log`,
+> never hardcode port names, use `flash` for normal flashing”.
 
-> 跨客户端通用做法：烧录前先调用 **`flash_guide(chip)`** 工具获取标准流程（工具对
-> 所有支持 MCP 的客户端可见、可调用），再把本仓库的 `AGENTS.md` 复制到你的烧录工程
-> 根目录，Codex / Claude Code / Cursor / MiMo / Cline 等都会把流程规则注入系统提示。
+> Cross-client practice: call the **`flash_guide(chip)`** tool before flashing (tools are
+> visible and callable in every MCP client), and copy this repo's `AGENTS.md` to your
+> flashing project root so Codex / Claude Code / Cursor / MiMo / Cline inject the workflow.
 
-| Prompt | 用途 |
+| Prompt | Purpose |
 | --- | --- |
-| `flash-firmware` | 生成烧录步骤：选 `fk_log` → 认证 → 按 chip 默认参数烧录 → 验证 |
-| `recover-device` | 根据错误码输出恢复决策树 |
-| `collect-logs` | 生成日志采集步骤（AI 读取后自行分析日志判定运行情况） |
+| `flash-firmware` | Generates flashing steps: pick `fk_log` → auth → flash with chip defaults → verify |
+| `recover-device` | Recovery decision tree from an error code |
+| `collect-logs` | Generates log collection steps (the AI reads the log and analyzes the runtime status itself) |
 
-### Ai-WB2 / Ai-M62 正确用法摘要
+### Ai-WB2 / Ai-M62 usage summary
 
-- 先 `list_ports()`，选择 `role=fk_log`（WCH-LinkE VCP）的端口，
-  **绝不**使用 `role=fk_control`，也不要按端口名猜测或硬编码
-  （`/dev/ttyACM0` / `COM3` 在不同系统/插拔顺序下会变）。
-- 普通烧录只调用 `flash(firmware_path, chip, flash_port)`；自定义烧录命令
-  （如 `make eflash`）直接用 `flash` 的 `tool` 参数（支持 `{port}`/`{baud}`/
-  `{firmware}`/`{chip}` 占位符），无需额外的低层工具。
-- `chip="ai-wb2"` 默认 **break** / `baud_rate=921600`（`make flash`）：串口打断烧录，
-  只烧 App、不烧 boot2；固件不支持串口打断或执行过 `make erase_flash` 时，
-  改用 `mode="isp"` + `make eflash`（全量含 boot2，BOOT↑ + RST 进入 ISP）。
-- `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=921600`
-  （FlashKey 自带串口最高仅支持 921600；`2000000` 仅在外接 USB-UART 时可用）。
-- 烧录后必须验证：先 `log_open()` 打开日志监控，**再 `rst_pulse()` 复位模组**
-  采集完整启动日志，然后 `log_close()`，读取 `flashkey://log` 并**自行分析判定启动是否正常**
-  （有异常先排查，不要只转述日志原文），或 AT 模组发送 `AT+GMR`。
+- Call `list_ports()` first and pick the port with `role=fk_log` (WCH-LinkE VCP).
+  **Never** use `role=fk_control`, and never guess or hardcode port names
+  (`/dev/ttyACM0` / `COM3` change across systems and plug order).
+- For normal flashing call only `flash(firmware_path, chip, flash_port)`; custom flash
+  commands (e.g. `make eflash`) go through the `tool` parameter (supports `{port}`/`{baud}`/
+  `{firmware}`/`{chip}` placeholders) — no extra low-level tool is needed.
+- `chip="ai-wb2"` defaults to **break** / `baud_rate=921600` (`make flash`): serial-break
+  flashing writes only the App, not boot2; if the firmware does not support serial break or
+  the chip was erased with `make erase_flash`, use `mode="isp"` + `make eflash`
+  (full flash incl. boot2, BOOT↑ + RST enters ISP).
+- `chip="ai-m62"` uses **isp** mode with `baud_rate=921600` (FlashKey's own serial port
+  supports at most 921600; 2000000 requires an external USB-UART).
+- Verify after flashing: open `log_open()` first, **then `rst_pulse()` to reboot the module**
+  so the full boot log is captured, then `log_close()`, read `flashkey://log` and **analyze
+  it yourself to decide whether the boot is healthy** (investigate anomalies instead of just
+  quoting the log), or send `AT+GMR` on AT modules.
 
 ---
 
@@ -389,25 +393,26 @@ Issues and pull requests are welcome:
 
 [MIT](LICENSE) © 2026 Ai-Thinker Open
 
-## 错误码与恢复指引（Error Codes & Hints）
+## Error Codes & Hints
 
-工具失败时统一返回 `[错误码] 信息 + 下一步: ...`（MCP `isError`），
-Agent 与用户可据此判断：发生了什么、该不该直接重试、下一步调用哪个工具。
-本表与 `flashkey://docs/error-codes` 资源同源（由 `ERROR_GUIDE` 生成）。
+Tool failures always return `[ERROR_CODE] message + next step: ...` (MCP `isError`),
+so the agent and the user can tell what happened, whether to retry directly, and
+which tool to call next. This table shares its source with the
+`flashkey://docs/error-codes` resource (generated from `ERROR_GUIDE`).
 
-| code | 含义 | 建议下一步 |
+| code | Meaning | Suggested next step |
 | --- | --- | --- |
-| DEVICE_NOT_FOUND | 设备未插入/未挂载 | 插入 FK-01 等待握手；WSL 先 `usbip attach`，然后重试 |
-| HANDSHAKE_FAILED | 握手失败/重连超时 | 稍候重试；检查 USB 链路 |
-| PORT_BUSY | 串口被占用/烧录进行中 | 关闭占用串口的程序，等待烧录结束再重试 |
-| PORT_WRONG_ROLE | 用错端口角色 | 用 `list_ports()` 按 `role` 选择端口 |
-| AUTH_REQUIRED | 需要认证 | 先完成密钥认证（SET_KEY / flashkey_auth） |
-| AUTH_FAILED | 认证失败 | 重新 SET_KEY 覆盖烧录密钥 |
-| FLASH_PROTECTED | Flash 读保护 | 服务端已自动解锁重试；仍失败用 WCH-LinkUtility 解锁 |
-| FLASH_VERIFY_FAILED | 烧录校验不一致 | 确认 chip 参数与固件匹配后重烧 |
-| MODULE_NO_RESPONSE | 模组无响应 | 检查接线/波特率/是否进 Boot |
-| MODULE_MANIFEST_INVALID | 模组清单无效 | 检查 I2C 连接与模块清单 |
-| TIMEOUT | 响应超时 | 重试一次；持续超时检查连接与波特率 |
-| FRAME_CRC | 帧校验错误 | 直接重试 |
-| INVALID_ARG | 参数错误 | 按 hint 修正参数 |
-| INTERNAL_ERROR | 未分类错误 | 重试；仍失败查看服务日志 |
+| DEVICE_NOT_FOUND | Device not plugged in / mounted | Plug in FK-01 and wait for the handshake; on WSL run `usbip attach` first, then retry |
+| HANDSHAKE_FAILED | Handshake failed / reconnect timeout | Retry shortly; check the USB link |
+| PORT_BUSY | Serial port busy / flashing in progress | Close programs holding the port and wait for flashing to finish, then retry |
+| PORT_WRONG_ROLE | Wrong port role | Pick the port by `role` with `list_ports()` |
+| AUTH_REQUIRED | Authentication required | Complete key authentication first (SET_KEY / flashkey_auth) |
+| AUTH_FAILED | Authentication failed | Re-run SET_KEY to overwrite the flashing key |
+| FLASH_PROTECTED | Flash read protection | The server already retries with auto-unlock; if it still fails, unlock with WCH-LinkUtility |
+| FLASH_VERIFY_FAILED | Flash verification mismatch | Confirm `chip` matches the firmware, then reflash |
+| MODULE_NO_RESPONSE | Module not responding | Check wiring / baud rate / whether it entered Boot |
+| MODULE_MANIFEST_INVALID | Invalid module manifest | Check the I2C connection and the module manifest |
+| TIMEOUT | Response timeout | Retry once; if it keeps timing out, check the connection and baud rate |
+| FRAME_CRC | Frame CRC error | Retry directly |
+| INVALID_ARG | Invalid argument | Fix the argument per the hint |
+| INTERNAL_ERROR | Unclassified error | Retry; if it still fails, check the server log |
