@@ -326,6 +326,11 @@ MCP 服务通过 **resources** 提供权威参考数据，通过 **prompts** 提
 
 > 版本策略：内置 hex（FK-01 设备固件）**已固化**，与 flashkey-mcp 包版本相互独立——
 > flashkey-mcp 可频繁发版，hex 只在 FK-01 固件有新构建时才更新，不会随包版本变动。
+>
+> 固件更新源：`firmware_check` 的 hex 更新检测优先走 **FlashKey 仓库**
+> （`https://github.com/Ai-Thinker-Open/FlashKey`，可用 `FLASHKEY_FIRMWARE_REPO` 覆盖），
+> 以该仓库 `releases/latest` 的 tag 作为固件版本；该仓库尚未发布 Release 时，
+> 自动回退到 flashkey-mcp 仓库的 `firmware.json` 清单。
 
 ⚠️ 烧录前置条件：把 FlashKey 自带的 WCH-LinkE 通过 USB 接入电脑，并将 SWDIO/SWCLK/GND/3V3 接到 CH32V203 的 SWD 接口且目标板上电；WSL 环境需先 `usbip attach`。烧录需要显式传 `confirm=True`；普通烧录失败且疑似读保护/写保护时，工具会自动用带 unlock 的全片擦除+烧录重试一次，仍失败会提示用 Windows 主机的 **WCH-LinkUtility** 手动解锁。
 

@@ -45,6 +45,15 @@ GITEE_RAW_FIRMWARE_JSON_URL = (
     "https://gitee.com/{repo}/raw/{tag}/src/flashkey_mcp/firmware/firmware.json"
 )
 
+# FK-01 设备固件源仓库（hex 发布仓库）。
+# 该仓库目前尚未标准化（暂以 releases/latest 的 tag 作为固件版本），
+# 后续标准化后可按规范读取 manifest / 附件；可用 FLASHKEY_FIRMWARE_REPO 覆盖。
+FIRMWARE_REPO_ENV = "FLASHKEY_FIRMWARE_REPO"
+FIRMWARE_REPO = os.environ.get(FIRMWARE_REPO_ENV, "Ai-Thinker-Open/FlashKey")
+FIRMWARE_RELEASES_LATEST_URL = (
+    f"https://api.github.com/repos/{FIRMWARE_REPO}/releases/latest"
+)
+
 # ── Update source selection ───────────────────────────────────────────
 # ``FLASHKEY_UPDATE_SOURCE=auto`` (default) tries GitHub first, then Gitee;
 # ``=github`` / ``=gitee`` pins a single source (useful behind firewalls).
@@ -446,6 +455,11 @@ def fetch_latest_release(timeout: int = NETWORK_TIMEOUT_S) -> dict | None:
     return None
 
 
+def fetch_latest_firmware_release(timeout: int = NETWORK_TIMEOUT_S) -> dict | None:
+    """``releases/latest`` of the FK-01 firmware source repo (FlashKey)."""
+    return fetch_json(FIRMWARE_RELEASES_LATEST_URL, timeout=timeout)
+
+
 def fetch_manifest_at_tag(tag: str, timeout: int = NETWORK_TIMEOUT_S) -> dict | None:
     """Fetch the ``firmware.json`` bundled at a specific release tag."""
     for url in _manifest_urls(tag):
@@ -492,22 +506,37 @@ def check_firmware_update(
     manifest = bundled_manifest()
     bundled_version = (manifest or {}).get("version")
 
+    # ── 包更新：flashkey-mcp 仓库 releases/latest ──
     release = fetch_latest_release(timeout=timeout)
-    latest_mcp_version: str | None = None
+    latest_mcp_version: str | None = (
+        str(release["tag_name"]).lstrip("v") if release and release.get("tag_name") else None
+    )
+
+    # ── 设备固件更新：优先 FlashKey 仓库（hex 发布仓库）──
+    # FlashKey 仓库未标准化时可能没有 Release，回退到 flashkey-mcp 仓库的
+    # releases/latest + 对应 tag 的 firmware.json。
     latest_hex_version: str | None = None
     changelog: str | None = None
     release_url: str | None = None
-    if release:
-        tag = release.get("tag_name")
-        if tag:
-            latest_mcp_version = str(tag).lstrip("v")
-        release_url = release.get("html_url")
-        body = (release.get("body") or "").strip()
+    firmware_source_repo = FIRMWARE_REPO
+    fw_release = fetch_latest_firmware_release(timeout=timeout)
+    if fw_release and fw_release.get("tag_name"):
+        latest_hex_version = str(fw_release["tag_name"]).lstrip("v")
+        release_url = fw_release.get("html_url") or release_url
+        body = (fw_release.get("body") or "").strip()
         changelog = body[:1000] or None
-        if tag:
-            latest_manifest = fetch_manifest_at_tag(str(tag), timeout=timeout)
-            if latest_manifest:
-                latest_hex_version = latest_manifest.get("version")
+    else:
+        # 回退：flashkey-mcp 仓库 releases/latest + 对应 tag 的 firmware.json
+        firmware_source_repo = GITHUB_REPO
+        if release:
+            release_url = release.get("html_url") or release_url
+            body = (release.get("body") or "").strip()
+            changelog = body[:1000] or None
+            tag = release.get("tag_name")
+            if tag:
+                latest_manifest = fetch_manifest_at_tag(str(tag), timeout=timeout)
+                if latest_manifest:
+                    latest_hex_version = latest_manifest.get("version")
 
     installed = str(__version__)
     package_update_available = bool(
@@ -529,4 +558,5 @@ def check_firmware_update(
         "package_update_available": package_update_available,
         "changelog": changelog,
         "release_url": release_url,
+        "firmware_source_repo": firmware_source_repo,
     }

@@ -351,6 +351,11 @@ still overwrites the temporary `flashkey://log`; historical archives are not aff
 > Versioning policy: the bundled hex (FK-01 device firmware) is **hardened** and is
 > independent of the flashkey-mcp package version — the package can release often while
 > the hex only changes when the FK-01 firmware gets a new build.
+>
+> Firmware update source: `firmware_check` detects hex updates from the **FlashKey repo**
+> (`https://github.com/Ai-Thinker-Open/FlashKey`, overridable via `FLASHKEY_FIRMWARE_REPO`),
+> using the `releases/latest` tag as the firmware version; when that repo has no release
+> yet, it falls back to the flashkey-mcp repo's `firmware.json` manifest.
 
 ⚠️ Prerequisites: connect the FlashKey's built-in WCH-LinkE to your computer via USB and wire SWDIO/SWCLK/GND/3V3 to the CH32V203's SWD interface with the target powered on; in WSL you need `usbip attach` first. Flashing requires an explicit `confirm=True`. If a normal flash fails with a suspected read/write protection error, the tool automatically retries with an unlocked full-chip erase + flash; if it still fails, it will suggest manually unlocking with **WCH-LinkUtility** on a Windows host.
 

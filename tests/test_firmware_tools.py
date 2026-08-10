@@ -120,12 +120,14 @@ def test_fetch_all_sources_fail(monkeypatch):
 
 def test_check_firmware_update_offline_device(monkeypatch):
     monkeypatch.setattr(firmware_tools, "fetch_latest_release", lambda **kw: None)
+    monkeypatch.setattr(firmware_tools, "fetch_latest_firmware_release", lambda **kw: None)
     result = firmware_tools.check_firmware_update(device_version=None)
     assert result["device_version"] is None
     assert result["latest_mcp_version"] is None
     assert result["update_available"] is False
     assert result["package_update_available"] is False
     assert result["bundled_hex_version"] == "0.1.5"
+    assert result["firmware_source_repo"] == firmware_tools.GITHUB_REPO
 
 
 def test_check_firmware_update_newer_release(monkeypatch):
@@ -148,12 +150,14 @@ def test_check_firmware_update_newer_release(monkeypatch):
         "fetch_manifest_at_tag",
         lambda tag, **kw: {"version": "0.2.0", "sha256": "x" * 64},
     )
+    monkeypatch.setattr(firmware_tools, "fetch_latest_firmware_release", lambda **kw: None)
     result = firmware_tools.check_firmware_update(device_version="0.1.1")
     assert result["latest_mcp_version"] == "0.2.0"
     assert result["latest_hex_version"] == "0.2.0"
     assert result["package_update_available"] is True
     assert result["update_available"] is True
     assert result["changelog"] == "Release notes..."
+    assert result["firmware_source_repo"] == firmware_tools.GITHUB_REPO
 
 
 def test_check_firmware_update_already_latest(monkeypatch):
@@ -170,9 +174,34 @@ def test_check_firmware_update_already_latest(monkeypatch):
         "fetch_manifest_at_tag",
         lambda tag, **kw: {"version": "0.2.0"},
     )
+    monkeypatch.setattr(firmware_tools, "fetch_latest_firmware_release", lambda **kw: None)
     result = firmware_tools.check_firmware_update(device_version="0.2.0")
     assert result["update_available"] is False
     assert result["package_update_available"] is False
+
+
+def test_check_firmware_update_uses_flashkey_repo(monkeypatch):
+    """Hex updates come from the FlashKey repo (releases/latest tag = version)."""
+    import flashkey_mcp
+
+    monkeypatch.setattr(flashkey_mcp, "__version__", "0.1.3")
+    monkeypatch.setattr(
+        firmware_tools,
+        "fetch_latest_firmware_release",
+        lambda **kw: {
+            "tag_name": "v0.1.6",
+            "html_url": (
+                "https://github.com/Ai-Thinker-Open/FlashKey/releases/tag/v0.1.6"
+            ),
+            "body": "FK-01 固件 v0.1.6 更新内容",
+        },
+    )
+    result = firmware_tools.check_firmware_update(device_version="0.1.5")
+    assert result["latest_hex_version"] == "0.1.6"
+    assert result["update_available"] is True
+    assert result["changelog"] == "FK-01 固件 v0.1.6 更新内容"
+    assert result["firmware_source_repo"] == firmware_tools.FIRMWARE_REPO
+    assert "FlashKey/releases" in result["release_url"]
 
 
 # ── Flash validation / orchestration ─────────────────────────────────
