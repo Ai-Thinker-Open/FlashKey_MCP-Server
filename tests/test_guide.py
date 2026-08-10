@@ -49,6 +49,7 @@ def test_flash_firmware_prompt_bl602() -> None:
     assert "flashkey://log" in assistant
     assert "Please Press Reset Key!" in assistant
     assert "boot2" in assistant
+    assert "rst_pulse" in assistant
 
 
 def test_flash_firmware_prompt_bl602_isp() -> None:

@@ -13,8 +13,9 @@
    - Ai-WB2：默认 **break**（串口打断，`make flash`，只烧 App）；固件不支持串口打断或执行过
      `make erase_flash` 时，用 `mode="isp"`（`make eflash`，全量含 boot2）。
    - Ai-M62：**isp** 模式；FlashKey 自带串口最高仅支持 **921600**（2000000 需外接 USB-UART）。
-4. 烧录后必须验证：`log_open(port=<fk_log 端口>, baud_rate=115200, project=<项目名>)`
-   → 继续其他操作 → `log_close()` → 读取 `flashkey://log`，**自行分析日志判定启动是否正常**
+4. 烧录后必须验证：先 `log_open(port=<fk_log 端口>, baud_rate=115200, project=<项目名>)`
+   打开日志监控，**再 `rst_pulse()` 发送复位脉冲让模组重启**——这是采集完整启动日志的关键，
+   不能跳过；然后 `log_close()` → 读取 `flashkey://log`，**自行分析日志判定启动是否正常**
    （有异常先排查，不要只转述日志原文）；AT 模组可发送 `AT+GMR` 确认版本。
 
 ## 采集日志

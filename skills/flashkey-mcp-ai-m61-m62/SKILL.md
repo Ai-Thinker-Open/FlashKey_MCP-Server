@@ -44,6 +44,7 @@ flash(
 
 ```
 log_open(port="/dev/ttyUSB0", baud_rate=115200)
+rst_pulse(50)  # 必须复位让模组重启，才能采集到完整启动日志
 log_close()
 # 读取 flashkey://log 查看启动日志
 ```

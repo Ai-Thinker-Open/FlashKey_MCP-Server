@@ -208,7 +208,8 @@ FLASH_GUIDE_DOC = """\
 2. `status()` → 未认证先完成密钥认证（SET_KEY / flashkey_auth）。
 3. `flash(firmware_path=<固件路径>, chip=<Ai-WB2/Ai-M62>, flash_port=<fk_log 端口>, baud_rate=<默认值>, ...)`。
 4. 烧录后验证：`log_open(port=<fk_log 端口>, baud_rate=<目标日志波特率>, project=<项目名>)`
-   → 继续其他操作 → `log_close()` → 读取 `flashkey://log` 观察启动日志，
+   → **`rst_pulse()` 复位模组（采集完整启动日志的关键，不能跳过）** → `log_close()`
+   → 读取 `flashkey://log` 观察启动日志，
    并**自行分析日志判定启动是否正常**（有异常先排查，不要只转述日志原文）；
    日志会自动归档到 `~/flashkey-logs/<project>/`（每项目最多 10 份，超出覆盖最旧），
    可用 `flashkey://logs/<project>` 列历史；
@@ -257,7 +258,7 @@ _INSTRUCTIONS = (
     "烧录只用 flash（firmware_path、chip、flash_port），"
     "Ai-WB2 默认 break/921600，可 isp（make eflash 全量含 boot2）；"
     "Ai-M62 默认 isp/921600（FlashKey 串口上限）。"
-    "烧后读 log 验证或 AT+GMR，AI 自行分析日志判定运行状态。"
+    "烧后验证：log_open 后先 rst_pulse 复位采完整启动日志，再 log_close 并自行分析；或 AT+GMR。"
     "日志采集用 log_open(project=...)，close 自动归档 flashkey://logs/{project}（10 份/项目）。"
     "错误见 error-codes；设备掉线先 recover(reattach=True)。"
 )
@@ -343,8 +344,9 @@ def _prompt_flash_firmware(
         f"flash_port=\"{port_display}\", baud_rate={selected_baud}, mode=\"{selected_mode}\")"
         f"{extra}\n"
         f"   - {chip_note}\n"
-        f"4. 烧录完成后验证：log_open(port=\"{port_display}\", baud_rate=115200)，"
-        f"继续其他操作后调用 log_close()，再读取 flashkey://log 观察启动日志，"
+        f"4. 烧录完成后验证：先 log_open(port=\"{port_display}\", baud_rate=115200) "
+        f"打开日志监控，然后**必须**调用 rst_pulse() 发送复位脉冲让模组重启，"
+        f"才能采集到完整启动日志；再 log_close()，读取 flashkey://log 观察启动日志，"
         f"并自行分析日志判定启动是否正常（有异常先排查，不要只转述日志原文）；"
         f"AT 模组可发送 AT+GMR 确认版本。\n"
         f"5. 若返回错误码，先读 flashkey://docs/error-codes；"
@@ -411,7 +413,8 @@ def _prompt_collect_logs(
         f"2. 调用 status() 确认设备已连接且 authed=true。\n"
         f"3. 调用 log_open(port=\"{port_display}\", baud_rate={baud_rate}, "
         f"project=\"<用户当前项目名，未知用 default>\")，立即返回，不需要持续监控串口。\n"
-        f"4. 继续执行其他操作（如 rst_pulse() 复位、boot_set() 等）。\n"
+        f"4. 烧录后验证场景：**必须** rst_pulse() 发送复位脉冲让模组重启，"
+        f"才能采集到完整启动日志（不要跳过复位）；其他场景可继续执行 boot_set() 等操作。\n"
         f"5. 操作完成后调用 log_close() 关闭监控并释放串口。\n"
         f"6. 读取资源 flashkey://log 获取本次日志；下次 log_open() 会覆盖旧日志。\n"
         f"7. 自行分析日志内容并判定运行情况：检查启动流程是否正常（boot 版本、"

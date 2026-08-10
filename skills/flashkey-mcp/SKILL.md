@@ -221,8 +221,8 @@ send(port="/dev/ttyUSB0", data="48656C6C6F0D0A", encoding="hex")
 
 **调用 `flash()` 一键烧录**，FK-01 自动处理时序和恢复。
 
-**烧录后**：`log_open(port, baud_rate=115200)` → `log_close()` →
-读取 `flashkey://log` 验证启动日志。
+**烧录后**：`log_open(port, baud_rate=115200)` → **`rst_pulse()` 复位模组采集完整启动日志**
+→ `log_close()` → 读取 `flashkey://log` 验证启动日志。
 
 ---
 

@@ -233,7 +233,7 @@ flash(firmware_path="/path/to/firmware.bin", chip="ai-wb2", flash_port="ttyACM1"
 
 ```
 log_open(port="ttyACM1", baud_rate=115200, project="my_app")  # 后台开始监控，立即返回
-rst_pulse(50)                               # 可继续执行其他工具
+rst_pulse(50)                               # 烧录后验证必须复位：让模组重启，采集完整启动日志
 log_close()                                 # 关闭并释放串口
 # 读取资源 flashkey://log 获取本次日志
 # 如需长期保存：log_dump(dest_path="~/logs/boot.txt") 转存到文件
@@ -330,8 +330,8 @@ through the injected server instructions and tool descriptions.
   改用 `mode="isp"` + `make eflash`（全量含 boot2，BOOT↑ + RST 进入 ISP）。
 - `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=921600`
   （FlashKey 自带串口最高仅支持 921600；`2000000` 仅在外接 USB-UART 时可用）。
-- 烧录后必须验证：`log_open()` → 其他操作 → `log_close()`，
-  再读取 `flashkey://log` 观察启动日志，并**自行分析日志判定启动是否正常**
+- 烧录后必须验证：先 `log_open()` 打开日志监控，**再 `rst_pulse()` 复位模组**
+  采集完整启动日志，然后 `log_close()`，读取 `flashkey://log` 并**自行分析判定启动是否正常**
   （有异常先排查，不要只转述日志原文），或 AT 模组发送 `AT+GMR`。
 
 ---
