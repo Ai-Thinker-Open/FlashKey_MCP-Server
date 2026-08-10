@@ -1,6 +1,6 @@
 {
-  "version": "0.1.2",
-  "md5": "d4bd11206b80c6ad628b3c18306a256f",
-  "sha256": "766359d69a4f1c6b5755f3d555976bf14721998b347d12b0c1e4bef10d021005",
-  "changelog": "v0.1.2: 随 flashkey-mcp 发布的 FK-01 固件（构建来源: /home/seahi/workspace/FlashKey）"
+  "version": "0.1.3",
+  "md5": "2c10d12af3bd62117f9b6812beefbfe4",
+  "sha256": "e30e40e52f56a9975ea7e5b0dfd24ff602e53d64044c71c7e1b437bca1c48679",
+  "changelog": "v0.1.3: 随 flashkey-mcp 发布的 FK-01 固件（构建来源: /home/seahi/workspace/FlashKey）"
 }
