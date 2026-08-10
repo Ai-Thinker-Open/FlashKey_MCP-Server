@@ -348,6 +348,10 @@ still overwrites the temporary `flashkey://log`; historical archives are not aff
 
 `firmware_check()` checks the device's current firmware version, the firmware bundled with the installed package, and the installed plugin version, comparing them with the latest GitHub release; `firmware_flash()` flashes the CH32V203 via WCH-LinkE (SDI), using the bundled hex by default (a custom `hex_path` is also supported).
 
+> Versioning policy: the bundled hex (FK-01 device firmware) is **hardened** and is
+> independent of the flashkey-mcp package version — the package can release often while
+> the hex only changes when the FK-01 firmware gets a new build.
+
 ⚠️ Prerequisites: connect the FlashKey's built-in WCH-LinkE to your computer via USB and wire SWDIO/SWCLK/GND/3V3 to the CH32V203's SWD interface with the target powered on; in WSL you need `usbip attach` first. Flashing requires an explicit `confirm=True`. If a normal flash fails with a suspected read/write protection error, the tool automatically retries with an unlocked full-chip erase + flash; if it still fails, it will suggest manually unlocking with **WCH-LinkUtility** on a Windows host.
 
 The OpenOCD binaries (WCH v1.6, Linux x64 / Windows x64) are bundled in `flashkey_mcp/openocd/` — no separate installation needed. You can override the path with the `FLASHKEY_OPENOCD` environment variable. Licenses for bundled components are in `NOTICE-OPENOCD.md`.

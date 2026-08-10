@@ -28,6 +28,9 @@
 ## 注意
 
 - 固件版本（`firmware.json.version`，设备侧）与包版本（tag，MCP 侧）是两套号，不要混用。
+- **hex 已固化**：FK-01 设备固件一旦定型不会轻易变动，**不随 flashkey-mcp 每个版本更新**。
+  只有 FK-01 固件确实有了新构建（新 hex）时，才替换内置 hex 并更新 `firmware.json`；
+  flashkey-mcp 的包版本（tag）独立递增，发版时 hex 通常保持不变。
 - OpenOCD 二进制随包内置（Linux x64 / Windows x64，来自 wch-openocd v1.6）；
   升级包时如 WCH 有新版 OpenOCD，一并更新 `src/flashkey_mcp/openocd/bin/`。
 - 首次发布必须手动创建 Release；在没有 Release 或网络不可达时，

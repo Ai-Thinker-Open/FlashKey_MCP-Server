@@ -324,6 +324,9 @@ MCP 服务通过 **resources** 提供权威参考数据，通过 **prompts** 提
 
 `firmware_check()` 检查设备当前固件版本、安装包内置固件版本与已安装插件版本，并与 GitHub 最新 Release 对比；`firmware_flash()` 通过 WCH-LinkE（SDI）烧录 CH32V203（默认烧包内内置 hex，也可传 `hex_path`）。
 
+> 版本策略：内置 hex（FK-01 设备固件）**已固化**，与 flashkey-mcp 包版本相互独立——
+> flashkey-mcp 可频繁发版，hex 只在 FK-01 固件有新构建时才更新，不会随包版本变动。
+
 ⚠️ 烧录前置条件：把 FlashKey 自带的 WCH-LinkE 通过 USB 接入电脑，并将 SWDIO/SWCLK/GND/3V3 接到 CH32V203 的 SWD 接口且目标板上电；WSL 环境需先 `usbip attach`。烧录需要显式传 `confirm=True`；普通烧录失败且疑似读保护/写保护时，工具会自动用带 unlock 的全片擦除+烧录重试一次，仍失败会提示用 Windows 主机的 **WCH-LinkUtility** 手动解锁。
 
 OpenOCD 二进制（WCH v1.6，Linux x64 / Windows x64）已随包内置在 `flashkey_mcp/openocd/`，无需单独安装；可用环境变量 `FLASHKEY_OPENOCD` 覆盖路径。随附组件的许可证见包内 `NOTICE-OPENOCD.md`。
