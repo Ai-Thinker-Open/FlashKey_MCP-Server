@@ -9,7 +9,7 @@ description = "FlashKey FK-01 MCP server — AI-native USB programmer & debugger
 requires-python = ">=3.10"
 dependencies = [
     "pyserial>=3.5",
-    "mcp>=1.0,<2",
+    "mcp>=1.28,<2",
     # SSE 是默认传输方式（共享常驻服务），因此运行时依赖直接内置
     "starlette>=0.38",
     "uvicorn>=0.30",

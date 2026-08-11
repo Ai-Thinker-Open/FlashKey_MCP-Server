@@ -264,12 +264,22 @@ def flash_ch32v203(
     dry_run: bool = False,
     timeout: int = DEFAULT_FLASH_TIMEOUT_S,
     get_version_fn: Callable[[], str | None] | None = None,
+    progress_cb: Callable[[float, str], None] | None = None,
 ) -> dict:
     """Flash the FK-01 CH32V203 via OpenOCD/WCH-LinkE (SDI).
 
     Returns a result dict; raises :class:`ToolError` for validation and
     precondition failures so the MCP layer surfaces a clear message.
     """
+    def _emit(pct: float, message: str) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(pct, message)
+        except Exception as exc:
+            logger.debug("progress_cb failed: %s", exc)
+
+    _emit(2, "校验参数与固件文件")
     if not confirm:
         raise ToolError(
             "烧录 FK-01 自身固件属于高风险操作，请先确认 WCH-LinkE 已接到 "
@@ -312,11 +322,13 @@ def flash_ch32v203(
             "如确需回退请传 force=True。"
         )
 
+    _emit(5, "固件校验通过")
     binary = resolve_openocd()
     if binary is None:
         raise ToolError(OPENOCD_NOT_FOUND_MSG)
 
     if dry_run:
+        _emit(100, "DRY_RUN：未执行实际烧录")
         return {
             "ok": True,
             "dry_run": True,
@@ -331,10 +343,12 @@ def flash_ch32v203(
     ok_probe, probe_detail = detect_wch_linke()
     if not ok_probe:
         raise ToolError(f"{HW_PREP_MSG}\n检测结果: {probe_detail}")
+    _emit(10, "检测到 WCH-LinkE 调试器")
 
     start = time.monotonic()
     unlocked_retried = False
     try:
+        _emit(25, "OpenOCD 擦写与校验中…")
         proc = _run_openocd(
             binary,
             _resource(DEBUG_CFG_REL),
@@ -345,6 +359,7 @@ def flash_ch32v203(
         if proc.returncode != 0 or not _flash_succeeded(output):
             if _looks_locked(output):
                 unlocked_retried = True
+                _emit(75, "检测到芯片锁定，执行解锁重烧")
                 proc = _run_openocd(
                     binary,
                     _resource(UNLOCK_CFG_REL),
@@ -360,6 +375,7 @@ def flash_ch32v203(
                 output = ((proc.stdout or "") + (proc.stderr or "")).strip()
     except subprocess.TimeoutExpired as exc:
         duration = time.monotonic() - start
+        _emit(90, f"烧录超时（>{timeout}s）")
         return {
             "ok": False,
             "before_version": before,
@@ -372,6 +388,7 @@ def flash_ch32v203(
 
     duration = time.monotonic() - start
     if proc.returncode != 0 or not _flash_succeeded(output):
+        _emit(90, "烧录失败，请查看日志摘要")
         return {
             "ok": False,
             "before_version": before,
@@ -386,6 +403,7 @@ def flash_ch32v203(
         }
 
     after = _wait_for_device(get_version_fn)
+    _emit(100, "烧录完成")
     return {
         "ok": True,
         "before_version": before,

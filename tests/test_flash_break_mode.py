@@ -10,6 +10,7 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -93,15 +94,16 @@ exit 0
 """)
     try:
         cmd = ["bash", script]
-        # Patch the prompt wait timeout to 2s for test speed
-        with patch("flashkey_mcp.server._flash_break_mode.__defaults__", (10,)):
+        # Patch the RST trigger delay to 0.2s for test speed
+        with patch("flashkey_mcp.server._BREAK_RST_DELAY_S", 0.2):
             success, lines = _flash_break_mode(fk, cmd, "", flash_timeout=10)
     finally:
         os.unlink(script)
 
-    # After timeout, the function should return False with error
-    # (the subprocess is killed by our 30s timeout, or we patched it...)
-    # Actually we need a different approach — the 30s is hardcoded in prompt_seen.wait()
+    # No prompt is required anymore: RST is pulsed after the fallback delay,
+    # then the tool overruns flash_timeout and is killed → failure.
+    fk.commands.rst_pulse.assert_called_once_with(50)
+    assert success is False
     print(f"  test_break_mode_timeout_when_no_prompt — result: success={success}")
     print(f"  lines: {lines}")
     print("  test_break_mode_timeout_when_no_prompt ✅ (manual verification)")
@@ -190,16 +192,107 @@ def test_tool_flash_rejects_invalid_mode():
     from mcp.server.fastmcp.exceptions import ToolError
 
     try:
-        _tool_flash(
-            firmware_path="/dev/null",
-            flash_port="/dev/ttyFAKE",
-            mode="jtag",  # invalid
+        asyncio.run(
+            _tool_flash(
+                firmware_path="/dev/null",
+                flash_port="/dev/ttyFAKE",
+                mode="jtag",  # invalid
+            )
         )
         assert False, "Should have raised"
     except (ToolError, RuntimeError) as exc:
         msg = str(exc)
         assert "不支持的烧录模式" in msg or "No FlashKey" in msg or "固件文件不存在" in msg, msg
     print("  test_tool_flash_rejects_invalid_mode ✅")
+
+
+# ── Test 6b: break mode progress callbacks ─────────────────────────────
+
+def test_break_mode_progress_cb_stages():
+    """progress_cb receives monotonic stage percentages with messages."""
+    from flashkey_mcp.server import _flash_break_mode
+
+    fk = _make_mock_fk()
+    script = _write_tool_script(r"""
+        #!/bin/bash
+echo "Please Press Reset"
+sleep 0.5
+echo "Flashing done"
+exit 0
+""")
+    stages = []
+    try:
+        cmd = ["bash", script]
+        success, _ = _flash_break_mode(
+            fk, cmd, "", flash_timeout=10,
+            progress_cb=lambda pct, msg: stages.append((pct, msg)),
+        )
+    finally:
+        os.unlink(script)
+
+    assert success is True, f"Expected success=True, got {success}"
+    assert stages, "progress_cb was never called"
+    pcts = [p for p, _ in stages]
+    assert pcts == sorted(pcts), f"progress must be monotonic: {stages}"
+    assert any("复位" in msg for _, msg in stages), f"missing stage message: {stages}"
+    assert any("写入" in msg for _, msg in stages), f"missing write message: {stages}"
+    print("  test_break_mode_progress_cb_stages ✅")
+
+
+# ── Test 6c: progress callback errors are ignored ──────────────────────
+
+def test_break_mode_progress_cb_errors_ignored():
+    """A raising progress_cb must not break the flash flow."""
+    from flashkey_mcp.server import _flash_break_mode
+
+    fk = _make_mock_fk()
+    script = _write_tool_script(r"""
+        #!/bin/bash
+echo "Please Press Reset"
+sleep 0.2
+echo "done"
+exit 0
+""")
+    try:
+        cmd = ["bash", script]
+        success, _ = _flash_break_mode(
+            fk, cmd, "", flash_timeout=10,
+            progress_cb=lambda pct, msg: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+    finally:
+        os.unlink(script)
+
+    assert success is True
+    fk.commands.rst_pulse.assert_called_once_with(50)
+    print("  test_break_mode_progress_cb_errors_ignored ✅")
+
+
+# ── Test 6d: RST pulse fires without any prompt text ───────────────────
+
+def test_break_mode_pulses_rst_without_prompt():
+    """Break mode must trigger one RST pulse even if the tool prints no prompt."""
+    from flashkey_mcp.server import _flash_break_mode
+
+    fk = _make_mock_fk()
+    # Tool that never prints a reset prompt but exits successfully after a moment
+    script = _write_tool_script(r"""
+        #!/bin/bash
+echo "starting sync..."
+sleep 0.3
+echo "write ok"
+exit 0
+""")
+    try:
+        cmd = ["bash", script]
+        with patch("flashkey_mcp.server._BREAK_RST_DELAY_S", 0.1):
+            success, lines = _flash_break_mode(fk, cmd, "", flash_timeout=10)
+    finally:
+        os.unlink(script)
+
+    assert success is True, f"Expected success=True, got {success} lines={lines}"
+    fk.commands.rst_pulse.assert_called_once_with(50)
+    assert "[FlashKey] RST 脉冲已发出" in "\n".join(lines)
+    print("  test_break_mode_pulses_rst_without_prompt ✅")
 
 
 # ── Test 7: Chinese prompt detection ────────────────────────────────────
@@ -244,6 +337,12 @@ def run_all():
         ("Break mode: Chinese prompt", test_break_mode_detects_chinese_prompt),
         ("Break mode: tool fails early", test_break_mode_process_fails_before_prompt),
         ("Break mode: prompt timeout", test_break_mode_timeout_when_no_prompt),
+        ("Break mode: progress callbacks", test_break_mode_progress_cb_stages),
+        (
+            "Break mode: progress cb errors ignored",
+            test_break_mode_progress_cb_errors_ignored,
+        ),
+        ("Break mode: RST without prompt", test_break_mode_pulses_rst_without_prompt),
     ]
 
     failures = []

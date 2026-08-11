@@ -335,6 +335,52 @@ def test_flash_dry_run(monkeypatch, tmp_path):
     assert len(result["commands"]) == 2
 
 
+def test_flash_progress_cb_stages(monkeypatch):
+    monkeypatch.setattr(firmware_tools, "resolve_openocd", lambda: Path("/usr/bin/openocd"))
+    monkeypatch.setattr(firmware_tools, "detect_wch_linke", lambda **kw: (True, "ok"))
+    stages = []
+
+    def fake_run(binary, cfg, commands, timeout):
+        stages.append(("openocd", cfg.name))
+        return mock.Mock(
+            returncode=0,
+            stdout="Info: Programming Finished\nInfo: Verified OK\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(firmware_tools, "_run_openocd", fake_run)
+    result = firmware_tools.flash_ch32v203(
+        "", confirm=True,
+        get_version_fn=lambda: "0.1.1",
+        progress_cb=lambda pct, msg: stages.append((pct, msg)),
+    )
+    assert result["ok"] is True
+    pcts = [s[0] for s in stages if isinstance(s[0], (int, float))]
+    assert pcts == sorted(pcts), f"progress must be monotonic: {stages}"
+    assert pcts[0] == 2 and pcts[-1] == 100, f"unexpected stage list: {stages}"
+    assert any(p == 25 and "OpenOCD" in m for p, m in stages if isinstance(p, (int, float)))
+
+
+def test_flash_progress_cb_errors_ignored(monkeypatch):
+    monkeypatch.setattr(firmware_tools, "resolve_openocd", lambda: Path("/usr/bin/openocd"))
+    monkeypatch.setattr(firmware_tools, "detect_wch_linke", lambda **kw: (True, "ok"))
+
+    def fake_run(binary, cfg, commands, timeout):
+        return mock.Mock(
+            returncode=0,
+            stdout="Info: Programming Finished\nInfo: Verified OK\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(firmware_tools, "_run_openocd", fake_run)
+    result = firmware_tools.flash_ch32v203(
+        "", confirm=True,
+        get_version_fn=lambda: "0.1.1",
+        progress_cb=lambda pct, msg: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert result["ok"] is True
+
+
 def test_detect_wch_linke_present(monkeypatch):
     monkeypatch.setattr(
         "flashkey_mcp.transport.list_all_ports",

@@ -18,6 +18,7 @@ already be authenticated and ready.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import atexit
 import logging
 import os
@@ -156,6 +157,16 @@ def _get_dm() -> DeviceManager:
 # Error wrapper — returns isError for unauthenticated tools
 # ======================================================================
 
+def _accepts_context(fn: Any) -> bool:
+    """Return True when *fn* declares a ``context`` parameter."""
+    import inspect as _inspect
+
+    try:
+        return "context" in _inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _tool_wrapper(fn: Any, require_auth: bool = True) -> Any:
     """Wrap a tool function with common error handling.
 
@@ -164,11 +175,18 @@ def _tool_wrapper(fn: Any, require_auth: bool = True) -> Any:
     :class:`FlashkeyError` with a stable error ``code``, a ``hint`` for
     the next step, and a ``retryable`` flag, so agents can decide
     whether to retry, recover, or stop.
+
+    The returned wrapper is async so blocking tools can yield to the
+    event loop.  FastMCP injects a :class:`Context` object into the
+    ``context`` parameter (excluded from the tool schema); it is
+    forwarded only to wrapped functions that declare it, enabling
+    server→client progress notifications.
     """
     import functools
+    import inspect as _inspect
 
     @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> dict:
+    async def wrapper(context: Context | None = None, *args: Any, **kwargs: Any) -> dict:
         if require_auth:
             try:
                 _get_dm().require_authed()
@@ -182,7 +200,13 @@ def _tool_wrapper(fn: Any, require_auth: bool = True) -> Any:
                     hint="先完成密钥认证（SET_KEY / flashkey_auth 流程）后重试",
                 ) from exc
         try:
-            return fn(*args, **kwargs)
+            call_kwargs = dict(kwargs)
+            if _accepts_context(fn):
+                call_kwargs["context"] = context
+            result = fn(*args, **call_kwargs)
+            if _inspect.isawaitable(result):
+                result = await result
+            return result
         except FlashkeyError:
             raise
         except TimeoutError as exc:
@@ -205,6 +229,79 @@ def _tool_wrapper(fn: Any, require_auth: bool = True) -> Any:
             ) from exc
 
     return wrapper
+
+
+# ======================================================================
+# Server→client progress notifications
+# ======================================================================
+
+PROGRESS_HEARTBEAT_S = 1.0
+
+
+def _discard_progress_future(fut: Any) -> None:
+    """Best-effort: swallow any error from a background progress send."""
+    if fut.cancelled():
+        return
+    exc = fut.exception()
+    if exc:
+        logger.debug("progress notification failed: %s", exc)
+
+
+class _Progress:
+    """Thread-safe, monotonically non-decreasing server→client progress.
+
+    ``stage`` is used from worker threads to snap to a stage milestone;
+    ``heartbeat`` is used by the async heartbeat task to interpolate
+    smoothly.  Without a client-supplied ``progressToken`` all sends no-op.
+    """
+
+    def __init__(self, context: Context | None, loop: asyncio.AbstractEventLoop) -> None:
+        self._context = context
+        self._loop = loop
+        self._last = 0.0
+        self._lock = threading.Lock()
+
+    def _report(self, pct: float, message: str) -> None:
+        if self._context is None:
+            return
+        try:
+            coro = self._context.report_progress(pct, total=100.0, message=message)
+            fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            fut.add_done_callback(_discard_progress_future)
+        except Exception as exc:
+            logger.debug("progress notification skipped: %s", exc)
+
+    def stage(self, pct: float, message: str) -> None:
+        with self._lock:
+            self._last = max(self._last, pct)
+            pct = self._last
+        self._report(pct, message)
+
+    def heartbeat(self, pct: float, message: str) -> None:
+        with self._lock:
+            if pct < self._last:
+                return
+            self._last = pct
+        self._report(pct, message)
+
+
+async def _progress_heartbeat(
+    progress: _Progress,
+    start_pct: float,
+    end_pct: float,
+    expected_s: float,
+    label: str,
+) -> None:
+    """Interpolate progress from *start_pct* toward *end_pct* over time."""
+    started = time.monotonic()
+    while True:
+        await asyncio.sleep(PROGRESS_HEARTBEAT_S)
+        elapsed = time.monotonic() - started
+        frac = min(elapsed / expected_s, 1.0)
+        progress.heartbeat(
+            start_pct + (end_pct - start_pct) * frac,
+            f"{label}（已运行 {int(elapsed)}s）",
+        )
 
 
 def _require_fk():
@@ -475,23 +572,34 @@ def _flash_atexit_cleanup() -> None:
 atexit.register(_flash_atexit_cleanup)
 
 
+# Break mode: RST 脉冲不依赖解析工具提示文本。启动烧录工具后，
+# 检测到复位提示（快路径）或经过该延时（兜底），先到者触发一次 RST 脉冲。
+_BREAK_RST_DELAY_S = 2.0
+
+
 def _flash_break_mode(
     fk: Any,
     flash_cmd: list[str],
     flash_dir: str,
     flash_timeout: int = 120,
+    progress_cb: Any = None,
 ) -> tuple[bool, list[str]]:
-    """BL602 serial break mode: run flash tool → detect prompt → RST pulse.
+    """BL602 serial break mode: run flash tool → one RST pulse → wait.
 
     The flash tool (bflb_iot_tool) sends a sync pattern on the flash port TX, then
-    prints "Please Press Reset Key!" and waits.  FK-01 pulses its RST pin
-    to reset the BL602 — the boot ROM detects the sync pattern at reset and
-    enters bootloader.  No BOOT pin manipulation needed.
+    waits for the target reset.  FK-01 pulses its RST pin to reset the BL602 —
+    the boot ROM detects the sync pattern at reset and enters bootloader.
+    No BOOT pin manipulation needed.
+
+    The RST pulse is triggered **without relying on parsing the tool's prompt
+    text** (which may be buffered, localized, or written to stderr): it fires
+    as soon as a reset prompt is detected, or after a short fixed delay
+    (``_BREAK_RST_DELAY_S``), whichever comes first.
 
     Sequence:
-    1. Start ``make flash`` (Popen), monitor stdout
-    2. Detect "Please Press Reset Key!" prompt
-    3. Pulse FK-01 RST → BL602 resets, boot ROM enters bootloader
+    1. Start ``make flash`` (Popen), monitor stdout/stderr
+    2. Wait for reset prompt or fallback delay
+    3. Pulse FK-01 RST once → BL602 resets, boot ROM enters bootloader
     4. Wait for flash tool to complete handshake and write
     5. Recovery: RST pulse to boot normally
 
@@ -499,6 +607,14 @@ def _flash_break_mode(
         ``(success, output_lines)``.
     """
     import threading as _threading
+
+    def _emit(pct: float, message: str) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(pct, message)
+        except Exception as exc:
+            logger.debug("progress_cb failed: %s", exc)
 
     # Ensure FK-01 GPIOs don't conflict with the flash port DTR/RTS control.
     # BOOT low = default, the serial bridge handles reset signalling via RTS.
@@ -508,6 +624,7 @@ def _flash_break_mode(
     output_lines: list[str] = []
 
     try:
+        _emit(10, "启动烧录工具（等待复位）")
         proc = subprocess.Popen(
             flash_cmd,
             stdout=subprocess.PIPE,
@@ -518,9 +635,9 @@ def _flash_break_mode(
 
         prompt_seen = _threading.Event()
 
-        def _read_stdout():
+        def _read_stream(stream):
             try:
-                for line in iter(proc.stdout.readline, ""):
+                for line in iter(stream.readline, ""):
                     if line:
                         output_lines.append(line.rstrip("\r\n"))
                         lower = line.lower()
@@ -532,41 +649,43 @@ def _flash_break_mode(
             except Exception:
                 pass
 
-        reader = _threading.Thread(target=_read_stdout, daemon=True)
-        reader.start()
+        out_reader = _threading.Thread(target=_read_stream, args=(proc.stdout,), daemon=True)
+        err_reader = _threading.Thread(target=_read_stream, args=(proc.stderr,), daemon=True)
+        out_reader.start()
+        err_reader.start()
 
-        # Wait for reset prompt (30 s max)
-        if not prompt_seen.wait(timeout=30):
-            logger.warning("Break mode: no reset prompt within 30 s")
-            if proc.poll() is None:
-                proc.kill()
-            reader.join(timeout=2)
-            return False, output_lines + [
-                "[错误] 未在 30 秒内检测到烧录工具的复位提示"
-            ]
-
-        logger.info("Break mode: reset prompt detected, pulsing FK-01 RST")
+        # Prompt detection is only a fast path — never a hard requirement.
+        # Wait for the prompt, the fallback delay, or an early tool exit.
+        rst_deadline = time.monotonic() + _BREAK_RST_DELAY_S
+        while proc.poll() is None and time.monotonic() < rst_deadline:
+            if prompt_seen.wait(timeout=min(0.1, rst_deadline - time.monotonic())):
+                break
+        if proc.poll() is not None:
+            # Tool exited before we could reset — no point pulsing RST.
+            out_reader.join(timeout=2)
+            err_reader.join(timeout=2)
+            success = proc.returncode == 0
+            if not success:
+                output_lines.append("[错误] 烧录工具提前退出（未触发 RST 复位）")
+            return success, output_lines
+        logger.info("Break mode: pulsing FK-01 RST (prompt=%s)", prompt_seen.is_set())
+        _emit(45, "触发一次 RST 脉冲（进入烧录）")
         fk.commands.rst_pulse(50)
         output_lines.append("[FlashKey] RST 脉冲已发出")
+        _emit(50, "固件写入中…")
 
         # Wait for flash tool to finish
-        remaining = flash_timeout - 30
         try:
-            proc.wait(timeout=max(remaining, 0) or flash_timeout)
+            proc.wait(timeout=flash_timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
-            reader.join(timeout=2)
+            out_reader.join(timeout=2)
+            err_reader.join(timeout=2)
+            _emit(90, f"烧录超时 ({flash_timeout} 秒)")
             return False, output_lines + [f"[错误] 烧录超时 ({flash_timeout} 秒)"]
 
-        reader.join(timeout=3)
-
-        # Collect any remaining stderr
-        try:
-            stderr_data = proc.stderr.read()
-            if stderr_data:
-                output_lines.append(stderr_data)
-        except Exception:
-            pass
+        out_reader.join(timeout=3)
+        err_reader.join(timeout=3)
 
         success = proc.returncode == 0
         return success, output_lines
@@ -587,9 +706,10 @@ _FLASH_DEFAULT_MODE: dict[str, str] = {
 }
 
 
-def _tool_flash(
+async def _tool_flash(
     firmware_path: str,
     flash_port: str,
+    context: Context | None = None,
     chip: str = "ai-m62",
     baud_rate: int = 921600,
     tool: str = "",
@@ -601,8 +721,8 @@ def _tool_flash(
     Two modes are supported:
 
     **break** (default for BL602) — serial break / 串口打断:
-        Run flash tool → wait for "please reset" prompt →
-        RST pulse → wait for completion → recovery.
+        Run flash tool → trigger one RST pulse (prompt detection or short
+        delay) → wait for completion → recovery.
         BL602 只烧 App，不烧 boot2；无法触发时改用 ISP。
 
     **isp** (default for BL616/BL618; BL602 传 mode="isp") — make eflash:
@@ -617,13 +737,22 @@ def _tool_flash(
         BL616:  ``make -C <flash_dir> flash CHIP=bl616 COMX=<port> BAUDRATE=<baud_rate>``
         BL618:  same as BL616 with CHIP=bl618
 
-    This is a **blocking** call.  Depending on firmware size, it may
-    take 10–120 seconds.
+    This is a **blocking** call for the client: depending on firmware
+    size, it may take 10–120 seconds.  Progress notifications are sent
+    via the injected ``context`` when the client supplies a
+    ``progressToken``.
     """
     global _flash_active_port, _flash_cleanup_needed, _flash_cleanup_dm
+    loop = asyncio.get_running_loop()
+    progress = _Progress(context, loop)
+
+    def _stage(pct: float, message: str) -> None:
+        progress.stage(pct, message)
+
     chip = _guide.normalize_chip(chip)
 
     # -- Validate params early ─────────────────────────────────────
+    _stage(2, "校验烧录参数")
     if not mode:
         mode = _FLASH_DEFAULT_MODE.get(chip, "isp")
 
@@ -645,11 +774,13 @@ def _tool_flash(
         )
 
     dm, fk = _require_fk()
+    _stage(5, "获取烧录锁")
 
     # -- Resolve flash tool command ----------------------------------
     flash_cmd = _resolve_flash_tool(
         chip, tool, flash_dir, flash_port, baud_rate, fw_path, mode,
     )
+    _stage(10, "解析烧录命令")
 
     # -- Acquire flash lock (mutual exclusion with log monitoring) ------
     if not _flash_lock.acquire(blocking=False):
@@ -660,6 +791,7 @@ def _tool_flash(
         )
 
     _flash_active_port = flash_port
+    dm.pause_keepalive()  # 长操作期间禁止空闲释放 FK-01 控制口
     start_time = time.monotonic()
     output_lines: list[str] = []
 
@@ -667,11 +799,22 @@ def _tool_flash(
     if mode == "break":
         _flash_cleanup_needed = True
         _flash_cleanup_dm = dm
+        _stage(15, "启动烧录工具（等待复位）")
+        heartbeat = asyncio.create_task(
+            _progress_heartbeat(progress, 15, 90, 45, "烧录进行中")
+        )
 
         try:
-            success, output_lines = _flash_break_mode(fk, flash_cmd, flash_dir)
+            success, output_lines = await asyncio.to_thread(
+                _flash_break_mode, fk, flash_cmd, flash_dir, 120, progress.stage,
+            )
         finally:
             _flash_cleanup_needed = False
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
             try:
                 # RST 引脚应连接到 BL602 CHIP_EN — 烧录完成后复位使芯片正常启动
                 fk.commands.rst_pulse(50)
@@ -679,9 +822,15 @@ def _tool_flash(
                 logger.error("Target recovery failed: %s", exc)
                 output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
             _flash_active_port = ""
+            dm.resume_keepalive()
             _flash_lock.release()
 
         duration = time.monotonic() - start_time
+        logger.info(
+            "Flash break result: success=%s duration=%.1fs output_tail=%r",
+            success, duration, "\n".join(output_lines)[-300:],
+        )
+        _stage(100, "烧录完成" if success else "烧录失败")
         return {
             "success": success,
             "output": "\n".join(output_lines),
@@ -695,16 +844,22 @@ def _tool_flash(
         # Enter bootloader mode: BOOT=HIGH + RST pulse before flash tool
         fk.commands.boot_set(True)
         fk.commands.rst_pulse(50)
-        time.sleep(0.2)  # ISP mode settling time
+        await asyncio.sleep(0.2)  # ISP mode settling time
+        _stage(15, "进入 ISP 模式（BOOT↑ + RST）")
+        _stage(25, "启动烧录工具（固件写入中）")
 
         # -- Run external flash tool -----------------------------------
         logger.info("Flashing %s (ISP): %s", chip, " ".join(flash_cmd))
 
         _flash_cleanup_needed = True
         _flash_cleanup_dm = dm
+        heartbeat = asyncio.create_task(
+            _progress_heartbeat(progress, 25, 90, 60, "固件写入中")
+        )
 
         try:
-            proc = subprocess.run(
+            proc = await asyncio.to_thread(
+                subprocess.run,
                 flash_cmd,
                 capture_output=True,
                 text=True,
@@ -719,6 +874,12 @@ def _tool_flash(
         except subprocess.TimeoutExpired:
             success = False
             output_lines.append("[错误] 烧录超时 (120 秒)")
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
     finally:
         # -- ALWAYS recover target -----------------------------------
         _flash_cleanup_needed = False
@@ -729,9 +890,16 @@ def _tool_flash(
             logger.error("Target recovery failed: %s", exc)
             output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
         _flash_active_port = ""
+        dm.resume_keepalive()
         _flash_lock.release()
 
     duration = time.monotonic() - start_time
+    logger.info(
+        "Flash isp result: success=%s duration=%.1fs output_tail=%r",
+        success, duration, "\n".join(output_lines)[-300:],
+    )
+    _stage(95, "目标芯片已复位")
+    _stage(100, "烧录完成" if success else "烧录失败")
     return {
         "success": success,
         "output": "\n".join(output_lines),
@@ -945,6 +1113,7 @@ def _tool_log_open(port: str, baud_rate: int = 115200, project: str = "") -> dic
             ) from exc
 
         _flash_active_port = port
+        _get_dm().pause_keepalive()  # 日志采集期间禁止空闲释放 FK-01 控制口
         stop_event = threading.Event()
         _log_session.update(
             open=True,
@@ -1111,6 +1280,7 @@ def _tool_log_close() -> dict:
             error="",
         )
         _flash_active_port = ""
+        _get_dm().resume_keepalive()
         try:
             _flash_lock.release()
         except RuntimeError:
@@ -1348,7 +1518,7 @@ def _summarize_data(raw: bytes, encoding: str) -> str:
 # MCP server setup
 # ======================================================================
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
 from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 from mcp.server.fastmcp.resources import FunctionResource, TextResource  # noqa: E402
 
@@ -1568,8 +1738,9 @@ mcp.add_tool(
         "注意：WCH-LinkE VCP (fk_log) 最高仅支持 921600，需要更高波特率时请用外接 USB-UART。\n"
         "\n"
         "支持两种烧录模式:\n"
-        "  Ai-WB2 break（默认，串口打断）: make flash 等待 'Please Press Reset Key!' →\n"
-        "         FK-01 RST 脉冲触发复位烧录；只烧 App 不烧 boot2，无法触发时改用 ISP。\n"
+        "  Ai-WB2 break（默认，串口打断）: 启动 make flash 后，工具会等待模组复位；\n"
+        "         FK-01 自动触发一次 RST 脉冲进入烧录（不依赖解析提示文本）；\n"
+        "         只烧 App 不烧 boot2，无法触发时改用 ISP。\n"
         "  Ai-WB2 isp: mode=\"isp\" → BOOT↑ + RST 脉冲进入 ISP 模式，执行 make eflash；\n"
         "         全量烧录含 boot2；make erase_flash 擦除芯片后必须用它。\n"
         "  Ai-M62 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
@@ -1667,7 +1838,8 @@ def _tool_firmware_check() -> dict:
     return firmware_tools.check_firmware_update(device_version=_read_device_version())
 
 
-def _tool_firmware_flash(
+async def _tool_firmware_flash(
+    context: Context | None = None,
     hex_path: str = "",
     confirm: bool = False,
     force: bool = False,
@@ -1676,20 +1848,40 @@ def _tool_firmware_flash(
 ) -> dict:
     """Flash the FK-01 CH32V203 firmware via WCH-LinkE (SDI)."""
     global _flash_active_port
+    loop = asyncio.get_running_loop()
+    progress = _Progress(context, loop)
+    progress.stage(1, "校验烧录参数")
     if not _flash_lock.acquire(blocking=False):
         raise ToolError("烧录/日志会话进行中，请等待当前操作完成后再试")
     _flash_active_port = "<fk203-swd>"
+    dm = _get_dm()
+    dm.pause_keepalive()  # 长操作期间禁止空闲释放 FK-01 控制口
+    heartbeat: asyncio.Task[Any] | None = None
     try:
-        return firmware_tools.flash_ch32v203(
+        heartbeat = asyncio.create_task(
+            _progress_heartbeat(progress, 10, 90, 45, "烧录 FK-01 固件中")
+        )
+        result = await asyncio.to_thread(
+            firmware_tools.flash_ch32v203,
             hex_path=hex_path,
             confirm=confirm,
             force=force,
             dry_run=dry_run,
             timeout=timeout,
             get_version_fn=_read_device_version,
+            progress_cb=progress.stage,
         )
+        progress.stage(100, "烧录完成" if result.get("ok") else "烧录失败")
+        return result
     finally:
+        if heartbeat is not None:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
         _flash_active_port = ""
+        dm.resume_keepalive()
         _flash_lock.release()
 
 
@@ -2231,6 +2423,13 @@ def _run_sse(host: str, port: int) -> None:
 
     sse_app = mcp.sse_app()
     streamable_app = mcp.streamable_http_app()
+    # 兼容把 /sse 当 Streamable HTTP 端点使用的客户端（它们 POST /sse 而不是 /mcp）：
+    # 把 /mcp 的处理器同时挂到 /sse 的 POST 上，避免这类客户端一直 405。
+    streamable_endpoint = None
+    for _route in streamable_app.routes:
+        if getattr(_route, "path", None) == "/mcp":
+            streamable_endpoint = getattr(_route, "endpoint", None)
+            break
     # Streamable HTTP 会话管理器要求 run() 生命周期；SDK 将 lifespan 保存在
     # 返回的 Starlette 的 router.lifespan_context 上，复用到顶层 app。
     streamable_lifespan = streamable_app.router.lifespan_context
@@ -2243,6 +2442,13 @@ def _run_sse(host: str, port: int) -> None:
             *streamable_app.routes,
             # SSE（兼容旧客户端）：SDK 内部已注册 /sse 与 /messages 路由
             *sse_app.routes,
+            # POST /sse → Streamable HTTP 兼容别名（放在 SSE 路由之后，
+            # 避免抢占 GET /sse 的经典 SSE 语义）
+            *(
+                [Route("/sse", endpoint=streamable_endpoint, methods=["POST"])]
+                if streamable_endpoint is not None
+                else []
+            ),
         ],
         lifespan=lambda _app: streamable_lifespan(_app),
     )

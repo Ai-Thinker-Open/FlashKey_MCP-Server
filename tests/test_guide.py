@@ -47,7 +47,8 @@ def test_flash_firmware_prompt_bl602() -> None:
     assert "log_open" in assistant
     assert "log_close" in assistant
     assert "flashkey://log" in assistant
-    assert "Please Press Reset Key!" in assistant
+    assert "RST 复位脉冲" in assistant
+    assert "不依赖解析提示文本" in assistant
     assert "boot2" in assistant
     assert "rst_pulse" in assistant
 

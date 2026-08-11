@@ -194,10 +194,11 @@ FLASH_GUIDE_DOC = """\
 
 ### Ai-WB2 两种模式
 
-1. **串口打断烧录（break，默认）**：`make flash` 运行成功后会等待模组复位，
-   并提示 `Please Press Reset Key!`。此时 FlashKey 用 RST 输出复位脉冲，
-   模组重启后即可触发烧录。该模式只烧录 App 应用程序，**不烧录 boot2**；
-   如果无法触发烧录，说明固件不支持串口打断，应改用 ISP 模式。
+1. **串口打断烧录（break，默认）**：`make flash` 启动后会等待模组复位，
+   工具自动触发一次 FK-01 RST 复位脉冲（检测到复位提示或短延时后触发，
+   不依赖解析提示文本），模组重启后即可触发烧录。该模式只烧录 App
+   应用程序，**不烧录 boot2**；如果无法触发烧录，说明固件不支持串口打断，
+   应改用 ISP 模式。
 2. **ISP 烧录（isp）**：芯片级烧录模式，需要芯片先进入 boot 烧录模式。
    FlashKey 拉高 BOOT 后发送复位脉冲即可进入 ISP 模式，之后执行 `make eflash`。
    该模式**全量烧录（含 boot2）**；执行过 `make erase_flash` 擦除芯片后必须使用 ISP 模式。
@@ -295,7 +296,8 @@ def _prompt_flash_firmware(
             selected_mode = "break"
             chip_note = (
                 f"{module_name} 串口打断模式（默认，make flash）：只烧录 App，不烧 boot2。"
-                "工具检测到 'Please Press Reset Key!' 后自动发 RST 脉冲触发；"
+                "工具启动后自动触发一次 FK-01 RST 复位脉冲（检测到复位提示或短延时后，"
+                "不依赖解析提示文本）；"
                 "若无法触发，说明固件不支持串口打断，请改用 mode=\"isp\"（make eflash）。"
             )
     elif chip_key in ("bl616", "bl618"):
