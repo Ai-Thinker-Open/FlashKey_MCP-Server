@@ -10,9 +10,10 @@
 2. 调用 `status()` 确认 `authed=true`；未认证先完成密钥认证。
 3. 烧录前先调用 `flash_guide(chip)` 获取标准流程，然后调用
    `flash(firmware_path=<固件绝对路径>, chip=<ai-wb2|ai-m62>, flash_port=<fk_log 端口>, baud_rate=921600, ...)`。
-   - Ai-WB2：默认 **break**（串口打断，`make flash`，只烧 App）；固件不支持串口打断或执行过
-     `make erase_flash` 时，用 `mode="isp"`（`make eflash`，全量含 boot2）。
-   - Ai-M62：**isp** 模式；FlashKey 自带串口最高仅支持 **921600**（2000000 需外接 USB-UART）。
+   - Ai-WB2 与 Ai-M62 统一 **isp** 模式（BOOT↑ + RST 进入 ISP）：
+     Ai-WB2 执行 `make eflash`（**全量烧录含 boot2**，`make erase_flash` 擦除后同样适用）；
+     旧的串口打断（break）模式已移除，`flash()` 无 mode 参数，统一 ISP 烧录。
+   - FlashKey 自带串口最高仅支持 **921600**（2000000 需外接 USB-UART）。
 4. 烧录后必须验证：先 `log_open(port=<fk_log 端口>, baud_rate=115200, project=<项目名>)`
    打开日志监控，**再 `rst_pulse()` 发送复位脉冲让模组重启**——这是采集完整启动日志的关键，
    不能跳过；然后 `log_close()` → 读取 `flashkey://log`，**自行分析日志判定启动是否正常**

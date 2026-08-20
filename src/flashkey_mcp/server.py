@@ -572,140 +572,6 @@ def _flash_atexit_cleanup() -> None:
 atexit.register(_flash_atexit_cleanup)
 
 
-# Break mode: RST 脉冲不依赖解析工具提示文本。启动烧录工具后，
-# 检测到复位提示（快路径）或经过该延时（兜底），先到者触发一次 RST 脉冲。
-_BREAK_RST_DELAY_S = 2.0
-
-
-def _flash_break_mode(
-    fk: Any,
-    flash_cmd: list[str],
-    flash_dir: str,
-    flash_timeout: int = 120,
-    progress_cb: Any = None,
-) -> tuple[bool, list[str]]:
-    """BL602 serial break mode: run flash tool → one RST pulse → wait.
-
-    The flash tool (bflb_iot_tool) sends a sync pattern on the flash port TX, then
-    waits for the target reset.  FK-01 pulses its RST pin to reset the BL602 —
-    the boot ROM detects the sync pattern at reset and enters bootloader.
-    No BOOT pin manipulation needed.
-
-    The RST pulse is triggered **without relying on parsing the tool's prompt
-    text** (which may be buffered, localized, or written to stderr): it fires
-    as soon as a reset prompt is detected, or after a short fixed delay
-    (``_BREAK_RST_DELAY_S``), whichever comes first.
-
-    Sequence:
-    1. Start ``make flash`` (Popen), monitor stdout/stderr
-    2. Wait for reset prompt or fallback delay
-    3. Pulse FK-01 RST once → BL602 resets, boot ROM enters bootloader
-    4. Wait for flash tool to complete handshake and write
-    5. Recovery: RST pulse to boot normally
-
-    Returns:
-        ``(success, output_lines)``.
-    """
-    import threading as _threading
-
-    def _emit(pct: float, message: str) -> None:
-        if progress_cb is None:
-            return
-        try:
-            progress_cb(pct, message)
-        except Exception as exc:
-            logger.debug("progress_cb failed: %s", exc)
-
-    # Ensure FK-01 GPIOs don't conflict with the flash port DTR/RTS control.
-    # BOOT low = default, the serial bridge handles reset signalling via RTS.
-    fk.commands.boot_set(False)
-
-    proc = None
-    output_lines: list[str] = []
-
-    try:
-        _emit(10, "启动烧录工具（等待复位）")
-        proc = subprocess.Popen(
-            flash_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=flash_dir if flash_dir else None,
-        )
-
-        prompt_seen = _threading.Event()
-
-        def _read_stream(stream):
-            try:
-                for line in iter(stream.readline, ""):
-                    if line:
-                        output_lines.append(line.rstrip("\r\n"))
-                        lower = line.lower()
-                        if any(
-                            kw in lower
-                            for kw in ("reset", "rest", "press", "uart", "复位", "please", "gpio8")
-                        ):
-                            prompt_seen.set()
-            except Exception:
-                pass
-
-        out_reader = _threading.Thread(target=_read_stream, args=(proc.stdout,), daemon=True)
-        err_reader = _threading.Thread(target=_read_stream, args=(proc.stderr,), daemon=True)
-        out_reader.start()
-        err_reader.start()
-
-        # Prompt detection is only a fast path — never a hard requirement.
-        # Wait for the prompt, the fallback delay, or an early tool exit.
-        rst_deadline = time.monotonic() + _BREAK_RST_DELAY_S
-        while proc.poll() is None and time.monotonic() < rst_deadline:
-            if prompt_seen.wait(timeout=min(0.1, rst_deadline - time.monotonic())):
-                break
-        if proc.poll() is not None:
-            # Tool exited before we could reset — no point pulsing RST.
-            out_reader.join(timeout=2)
-            err_reader.join(timeout=2)
-            success = proc.returncode == 0
-            if not success:
-                output_lines.append("[错误] 烧录工具提前退出（未触发 RST 复位）")
-            return success, output_lines
-        logger.info("Break mode: pulsing FK-01 RST (prompt=%s)", prompt_seen.is_set())
-        _emit(45, "触发一次 RST 脉冲（进入烧录）")
-        fk.commands.rst_pulse(50)
-        output_lines.append("[FlashKey] RST 脉冲已发出")
-        _emit(50, "固件写入中…")
-
-        # Wait for flash tool to finish
-        try:
-            proc.wait(timeout=flash_timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out_reader.join(timeout=2)
-            err_reader.join(timeout=2)
-            _emit(90, f"烧录超时 ({flash_timeout} 秒)")
-            return False, output_lines + [f"[错误] 烧录超时 ({flash_timeout} 秒)"]
-
-        out_reader.join(timeout=3)
-        err_reader.join(timeout=3)
-
-        success = proc.returncode == 0
-        return success, output_lines
-
-    except Exception as exc:
-        logger.exception("Break mode internal error: %s", exc)
-        return False, output_lines + [f"[错误] 烧录异常: {exc}"]
-
-
-# ── Chip → default mode ──────────────────────────────────────────────
-
-_FLASH_DEFAULT_MODE: dict[str, str] = {
-    # BL602: 默认串口打断（make flash）；固件不支持打断或擦除后改用 ISP（make eflash）。
-    # BL616/BL618: BOOT+RST first, then flash tool.
-    "bl602": "break",
-    "bl616": "isp",
-    "bl618": "isp",
-}
-
-
 async def _tool_flash(
     firmware_path: str,
     flash_port: str,
@@ -714,26 +580,17 @@ async def _tool_flash(
     baud_rate: int = 921600,
     tool: str = "",
     flash_dir: str = "",
-    mode: str = "",
 ) -> dict:
     """Single-call flash workflow.
 
-    Two modes are supported:
+    All chips use the **ISP mode**:
 
-    **break** (default for BL602) — serial break / 串口打断:
-        Run flash tool → trigger one RST pulse (prompt detection or short
-        delay) → wait for completion → recovery.
-        BL602 只烧 App，不烧 boot2；无法触发时改用 ISP。
-
-    **isp** (default for BL616/BL618; BL602 传 mode="isp") — make eflash:
         BOOT↑ → RST pulse → run flash tool → RST → BOOT↓.
-        BL602 的 ISP 模式全量烧录（含 boot2），`make erase_flash` 擦除后必须用它。
 
-    FK-01 handles BOOT/RST timing.  The actual firmware write is delegated
-    to an external tool::
+    FK-01 enters the target into ISP (boot) mode first, then delegates the
+    actual firmware write to an external tool::
 
-        BL602 break: ``make -C <flash_dir> flash p=<port> b=<baud>``
-        BL602 isp:   ``make -C <flash_dir> eflash p=<port> b=<baud>``
+        BL602:  ``make -C <flash_dir> eflash p=<port> b=<baud>`` (全量烧录含 boot2)
         BL616:  ``make -C <flash_dir> flash CHIP=bl616 COMX=<port> BAUDRATE=<baud_rate>``
         BL618:  same as BL616 with CHIP=bl618
 
@@ -753,14 +610,7 @@ async def _tool_flash(
 
     # -- Validate params early ─────────────────────────────────────
     _stage(2, "校验烧录参数")
-    if not mode:
-        mode = _FLASH_DEFAULT_MODE.get(chip, "isp")
-
-    if mode not in ("break", "isp"):
-        raise FlashkeyError(
-            E.INVALID_ARG, f"不支持的烧录模式: {mode}。可选: break, isp",
-            hint="请使用 break 或 isp 模式",
-        )
+    # 所有芯片统一 ISP 模式（break 串口打断已移除，无 mode 参数）
 
     # Reject FK-01 control port — must use fk_log (WCH-LinkE VCP)
     _validate_flash_port(flash_port)
@@ -778,7 +628,7 @@ async def _tool_flash(
 
     # -- Resolve flash tool command ----------------------------------
     flash_cmd = _resolve_flash_tool(
-        chip, tool, flash_dir, flash_port, baud_rate, fw_path, mode,
+        chip, tool, flash_dir, flash_port, baud_rate, fw_path,
     )
     _stage(10, "解析烧录命令")
 
@@ -794,50 +644,6 @@ async def _tool_flash(
     dm.pause_keepalive()  # 长操作期间禁止空闲释放 FK-01 控制口
     start_time = time.monotonic()
     output_lines: list[str] = []
-
-    # ── BREAK mode (BL602 serial interrupt) ──────────────────────────
-    if mode == "break":
-        _flash_cleanup_needed = True
-        _flash_cleanup_dm = dm
-        _stage(15, "启动烧录工具（等待复位）")
-        heartbeat = asyncio.create_task(
-            _progress_heartbeat(progress, 15, 90, 45, "烧录进行中")
-        )
-
-        try:
-            success, output_lines = await asyncio.to_thread(
-                _flash_break_mode, fk, flash_cmd, flash_dir, 120, progress.stage,
-            )
-        finally:
-            _flash_cleanup_needed = False
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
-            try:
-                # RST 引脚应连接到 BL602 CHIP_EN — 烧录完成后复位使芯片正常启动
-                fk.commands.rst_pulse(50)
-            except Exception as exc:
-                logger.error("Target recovery failed: %s", exc)
-                output_lines.append(f"[警告] 目标芯片复位失败: {exc}")
-            _flash_active_port = ""
-            dm.resume_keepalive()
-            _flash_lock.release()
-
-        duration = time.monotonic() - start_time
-        logger.info(
-            "Flash break result: success=%s duration=%.1fs output_tail=%r",
-            success, duration, "\n".join(output_lines)[-300:],
-        )
-        _stage(100, "烧录完成" if success else "烧录失败")
-        return {
-            "success": success,
-            "output": "\n".join(output_lines),
-            "duration": round(duration, 1),
-            "chip": chip,
-            "mode": mode,
-        }
 
     # ── ISP mode (BL602 make eflash / BL616/BL618 make flash) ────────
     try:
@@ -905,7 +711,7 @@ async def _tool_flash(
         "output": "\n".join(output_lines),
         "duration": round(duration, 1),
         "chip": chip,
-        "mode": mode,
+        "mode": "isp",
     }
 
 
@@ -918,13 +724,17 @@ _FLASH_BAUD_MAP: dict[str, int] = {
 }
 
 _FLASH_MAKE_ARGS_MAP: dict[str, str] = {
-    "bl602": "p={port} b={baud}",
-    "bl616": "CHIP=bl616 COMX={port} BAUDRATE={baud}",
-    "bl618": "CHIP=bl618 COMX={port} BAUDRATE={baud}",
+    # BL602: make eflash（ISP 全量烧录，含 boot2）
+    "bl602": "eflash p={port} b={baud}",
+    "bl616": "flash CHIP=bl616 COMX={port} BAUDRATE={baud}",
+    "bl618": "flash CHIP=bl618 COMX={port} BAUDRATE={baud}",
 }
 
-_FLASH_MAKE_ISP_ARGS_MAP: dict[str, str] = {
-    "bl602": "eflash p={port} b={baud}",
+# chip → Makefile target（与 _FLASH_MAKE_ARGS_MAP 一致）
+_FLASH_MAKE_TARGET_MAP: dict[str, str] = {
+    "bl602": "eflash",
+    "bl616": "flash",
+    "bl618": "flash",
 }
 
 
@@ -935,13 +745,13 @@ def _resolve_flash_tool(
     flash_port: str,
     baud_rate: int,
     fw_path: Path,
-    mode: str = "",
 ) -> list[str]:
     """Resolve the flash tool command for the target chip.
 
     Priority:
     1. User-supplied ``tool`` (run as-is with args substitued)
-    2. ``make flash`` / ``make eflash`` from SDK (if ``flash_dir`` is set)
+    2. ``make eflash`` (BL602) / ``make flash`` (BL616/BL618) from SDK
+       (if ``flash_dir`` is set)
     3. same from current directory (if Makefile has the target)
     4. Error with install instructions
     """
@@ -962,9 +772,7 @@ def _resolve_flash_tool(
     makefile = Path(make_dir) / "Makefile"
 
     if makefile.is_file():
-        make_target = (
-            "eflash" if mode == "isp" and chip == "bl602" else "flash"
-        )
+        make_target = _FLASH_MAKE_TARGET_MAP[chip]
         # Verify the Makefile has the target
         try:
             result = subprocess.run(
@@ -972,18 +780,14 @@ def _resolve_flash_tool(
                 capture_output=True, text=True, timeout=5,
             )
             if result.returncode != 2:  # 2 = no such target
-                args_tpl = (
-                    _FLASH_MAKE_ISP_ARGS_MAP.get(chip)
-                    if mode == "isp" and chip == "bl602"
-                    else _FLASH_MAKE_ARGS_MAP[chip]
-                )
+                args_tpl = _FLASH_MAKE_ARGS_MAP[chip]
                 args_str = args_tpl.format(port=flash_port, baud=baud_rate)
                 return ["make", "-C", make_dir, make_target] + args_str.split()
         except Exception:
             pass
 
     # -- 3. No tool found → error with instructions ------------------
-    if chip == "bl602" and mode == "isp":
+    if chip == "bl602":
         raise FlashkeyError(
             E.INVALID_ARG,
             "未找到 Ai-WB2 ISP 烧录工具（make eflash）。请克隆 Ai-Thinker-WB2 SDK，"
@@ -991,15 +795,6 @@ def _resolve_flash_tool(
             "或通过 tool 参数指定烧录命令。\n"
             "SDK: https://github.com/Ai-Thinker-Open/Ai-Thinker-WB2",
             hint="设置 flash_dir 为烧录工程目录，或通过 tool 参数指定 make eflash 命令",
-        )
-    elif chip == "bl602":
-        raise FlashkeyError(
-            E.INVALID_ARG,
-            "未找到 Ai-WB2 烧录工具（make flash）。请克隆 Ai-Thinker-WB2 SDK，"
-            "把 flash_dir 指向烧录工程目录（如 <sdk>/app），"
-            "或通过 tool 参数指定烧录命令。\n"
-            "SDK: https://github.com/Ai-Thinker-Open/Ai-Thinker-WB2",
-            hint="设置 flash_dir 为烧录工程目录，或通过 tool 参数指定烧录命令",
         )
     else:
         raise FlashkeyError(
@@ -1651,13 +1446,12 @@ mcp.add_tool(
 
 # ── flash_guide（烧录前学习流程）─────────────────────────────────────
 
-def _tool_flash_guide(chip: str = "ai-wb2", mode: str = "") -> dict:
+def _tool_flash_guide(chip: str = "ai-wb2") -> dict:
     """返回 Ai-WB2 / Ai-M62 标准烧录流程文本（无需认证，供 AI 烧录前学习）。"""
     try:
         messages = _guide._prompt_flash_firmware(
             chip=chip,
             firmware_path="<固件绝对路径>",
-            mode=mode,
         )
         guide_text = messages[1].content.text
         return {
@@ -1669,7 +1463,7 @@ def _tool_flash_guide(chip: str = "ai-wb2", mode: str = "") -> dict:
         raise FlashkeyError(
             E.INVALID_ARG,
             f"无法生成烧录指南: {exc}",
-            hint="chip 支持 ai-wb2 / ai-m62；mode 可选 break / isp",
+            hint="chip 支持 ai-wb2 / ai-m62；Ai-WB2 / Ai-M62 均使用 isp 模式",
         )
 
 
@@ -1681,7 +1475,6 @@ mcp.add_tool(
         "烧录前必须先调用本工具学习正确流程，再按步骤执行（无需认证）。\n"
         "参数:\n"
         "  chip: 模组名称，默认 ai-wb2（支持 ai-wb2 / ai-m62）\n"
-        "  mode: 可选；ai-wb2 的 break(默认)/isp\n"
         "返回: ok、chip、guide（完整步骤文本）。"
     ),
 )
@@ -1737,23 +1530,18 @@ mcp.add_tool(
         "不要根据端口名猜测角色，不同系统上名字不同 (COMx / ttyACMx / ttyUSBx / cu.*)。\n"
         "注意：WCH-LinkE VCP (fk_log) 最高仅支持 921600，需要更高波特率时请用外接 USB-UART。\n"
         "\n"
-        "支持两种烧录模式:\n"
-        "  Ai-WB2 break（默认，串口打断）: 启动 make flash 后，工具会等待模组复位；\n"
-        "         FK-01 自动触发一次 RST 脉冲进入烧录（不依赖解析提示文本）；\n"
-        "         只烧 App 不烧 boot2，无法触发时改用 ISP。\n"
-        "  Ai-WB2 isp: mode=\"isp\" → BOOT↑ + RST 脉冲进入 ISP 模式，执行 make eflash；\n"
-        "         全量烧录含 boot2；make erase_flash 擦除芯片后必须用它。\n"
-        "  Ai-M62 (isp): BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
+        "统一使用 ISP 烧录模式（无 mode 参数，break 串口打断已移除）:\n"
+        "  Ai-WB2: BOOT↑ + RST 脉冲进入 ISP 模式，执行 make eflash；\n"
+        "         全量烧录含 boot2；make erase_flash 擦除芯片后也能正常烧录。\n"
+        "  Ai-M62: BOOT↑ → RST 脉冲 → 烧录工具 → 恢复\n"
         "参数:\n"
         "  firmware_path: 固件文件绝对路径\n"
         "  flash_port: 烧录串口 — 必须选 list_ports() 中 role=fk_log 的端口\n"
         "  chip: 模组名称，支持 Ai-WB2 / Ai-M62\n"
         "  baud_rate: 烧录波特率。FlashKey 自带串口 (fk_log) 最高仅支持 921600，\n"
         "         Ai-WB2 默认 921600；Ai-M62 默认 921600（如需 2000000 必须改用外接 USB-UART）\n"
-        "  tool: 可选，自定义烧录命令 (如 'make flash p={port} b={baud}' 或 Ai-WB2 ISP\n"
-        "         'make eflash p={port} b={baud}' 占位符)\n"
-        "  flash_dir: 可选，烧录命令执行目录（包含 Makefile 的工程目录，如 Ai-WB2 SDK 的 <sdk>/app；用于 make flash / make eflash）\n"
-        "  mode: 烧录模式 (break/isp)。Ai-WB2 默认 break，Ai-M62 默认 isp；Ai-WB2 ISP 使用 make eflash。"
+        "  tool: 可选，自定义烧录命令 (如 Ai-WB2 'make eflash p={port} b={baud}' 占位符)\n"
+        "  flash_dir: 可选，烧录命令执行目录（包含 Makefile 的工程目录，如 Ai-WB2 SDK 的 <sdk>/app；用于 make eflash / make flash）\n"
         "需要认证。\n"
         "常见错误: PORT_WRONG_ROLE(端口选错→先用 list_ports 按 role 选 fk_log)、"
         "INVALID_ARG(chip/固件路径错→按 hint 修正)、FLASH_VERIFY_FAILED(chip 与固件不匹配→重烧)、"

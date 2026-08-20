@@ -309,11 +309,11 @@ MCP 服务通过 **resources** 提供权威参考数据，通过 **prompts** 提
 - 普通烧录只调用 `flash(firmware_path, chip, flash_port)`；自定义烧录命令
   （如 `make eflash`）直接用 `flash` 的 `tool` 参数（支持 `{port}`/`{baud}`/
   `{firmware}`/`{chip}` 占位符），无需额外的低层工具。
-- `chip="ai-wb2"` 默认 **break** / `baud_rate=921600`（`make flash`）：串口打断烧录，
-  只烧 App、不烧 boot2；固件不支持串口打断或执行过 `make erase_flash` 时，
-  改用 `mode="isp"` + `make eflash`（全量含 boot2，BOOT↑ + RST 进入 ISP）。
-- `chip="ai-m62"` 使用 **isp** 模式、默认 `baud_rate=921600`
-  （FlashKey 自带串口最高仅支持 921600；`2000000` 仅在外接 USB-UART 时可用）。
+- `chip="ai-wb2"` 与 `chip="ai-m62"` 统一使用 **isp** 模式、默认 `baud_rate=921600`
+  （BOOT↑ + RST 进入 ISP；FlashKey 自带串口最高仅支持 921600，`2000000` 仅在外接
+  USB-UART 时可用）。Ai-WB2 执行 `make eflash` —— **全量烧录（含 boot2）**，
+  执行过 `make erase_flash` 擦除或固件不支持串口打断时同样适用。
+  旧的串口打断（break）模式已移除。
 - 烧录后必须验证：先 `log_open()` 打开日志监控，**再 `rst_pulse()` 复位模组**
   采集完整启动日志，然后 `log_close()`，读取 `flashkey://log` 并**自行分析判定启动是否正常**
   （有异常先排查，不要只转述日志原文），或 AT 模组发送 `AT+GMR`。

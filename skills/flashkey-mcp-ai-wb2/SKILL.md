@@ -1,6 +1,6 @@
 ---
 name: flashkey-mcp-ai-wb2
-description: FlashKey FK-01 — Ai-WB2 (BL602) 串口打断烧录。Ai-Thinker-WB2 SDK。
+description: FlashKey FK-01 — Ai-WB2 (BL602) ISP 模式烧录（make eflash，全量含 boot2）。Ai-Thinker-WB2 SDK。
 ---
 
 # FlashKey FK-01 — Ai-WB2 烧录指南
@@ -9,45 +9,34 @@ description: FlashKey FK-01 — Ai-WB2 (BL602) 串口打断烧录。Ai-Thinker-W
 
 ---
 
-## 烧录原理：串口打断模式
+## 烧录原理：ISP 模式（唯一烧录方式）
 
-BL602 使用**串口打断**方式进入 bootloader：烧录工具 `bflb_iot_tool` 先往 fk_log 串口（WCH-LinkE VCP）TX 发送 sync 信号，然后打印 `Please Press Reset Key!` 等待复位。FK-01 检测到提示后通过 RST 引脚复位芯片，BL602 boot ROM 在复位时检测到 sync 信号即进入 bootloader 握手。
+Ai-WB2 (BL602) 统一使用 **ISP 芯片级烧录模式**：FK-01 拉高 BOOT 引脚后发送 RST 复位脉冲，
+芯片复位进入 bootloader（ISP 模式），然后执行 `make eflash` 全量烧录（**含 boot2**）。
 
-不需要 BOOT 引脚参与。串口桥 DTR/RTS 不参与复位，复位由 FK-01 RST 引脚完成。
+```
+BOOT↑ → RST 脉冲 → 进入 ISP → make eflash 烧录 → RST 恢复 → BOOT↓
+```
 
-## 烧录方式一：串口打断（默认，make flash）
+串口打断（break / `make flash`）模式已移除，不再支持；`flash()` 无 mode 参数，统一 ISP 烧录。
+
+## 标准烧录（默认即可）
 
 ```
 flash(
     firmware_path="/path/to/helloworld.bin",
-    flash_port="/dev/ttyUSB0",
-    chip="bl602",
+    flash_port="/dev/ttyUSB0",   # list_ports() 中 role=fk_log 的端口
+    chip="ai-wb2",
     baud_rate=921600,
     flash_dir="/path/to/sdk/app"
 )
 ```
 
-自动完成：启动 make flash → 检测 `Please Press Reset Key!` → RST 脉冲 → 握手 → 烧录 → RST 恢复。
+自动完成：BOOT↑ + RST 脉冲进入 ISP → 执行 `make eflash`（全量含 boot2）→ RST + BOOT↓ 恢复。
 
-## 烧录方式二：ISP 模式（make eflash）
+`make eflash` 不会重新编译，只执行烧录。芯片执行过 `make erase_flash` 擦除后同样使用此模式。
 
-**使用场景：**
-- 芯片执行过擦除后，必须用 ISP 模式
-- `make flash` 多次超时后，改用 ISP 模式
-
-`make eflash` 不会重新编译，只执行烧录。需要模组先进入 ISP 模式（BOOT 拉高 + RST 脉冲）。
-
-```
-flash(
-    firmware_path="/path/to/helloworld.bin",
-    flash_port="/dev/ttyUSB0",
-    chip="bl602",
-    baud_rate=921600,
-    flash_dir="/path/to/sdk/app",
-    mode="isp",
-    tool="make -C {flash_dir} eflash p={port} b={baud}"
-)
-```
+## 自定义烧录命令（tool 参数）
 
 自定义烧录命令直接用 `flash` 的 `tool` 参数（支持 {port}/{baud}/{firmware}/{chip} 占位符）：
 
@@ -56,7 +45,6 @@ flash(
     firmware_path="/path/to/helloworld.bin",
     flash_port="<list_ports() 中 role=fk_log 的端口>",
     chip="ai-wb2",
-    mode="isp",
     flash_dir="<flash_dir>/app",
     tool="make -C {flash_dir} eflash p={port} b={baud}"
 )
@@ -66,9 +54,8 @@ flash(
 
 | 参数 | 默认值 |
 |------|--------|
-| chip | bl602 |
-| baud_rate | 921600 |
-| mode | break（串口打断）|
+| chip | ai-wb2 |
+| baud_rate | 921600（FlashKey 串口上限） |
 | SDK | Ai-Thinker-WB2 |
 
 ## 烧录后验证
@@ -91,6 +78,7 @@ Ai-WB2 模组与 FK-01 连接：
 | fk_log TX (WCH-LinkE VCP) | GPIO7 (RX) |
 | fk_log RX (WCH-LinkE VCP) | GPIO16 (TX) |
 | RST (PB4) | CHIP_EN |
+| BOOT (PB3) | GPIO8 |
 | 3V3 | 3.3V |
 | GND | GND |
 
@@ -101,7 +89,6 @@ Ai-WB2 模组与 FK-01 连接：
 ├─ "shake hand fail" → 检查日志口 TX/RX 交叉接线
 ├─ 串口无输出 → 检查 Ai-WB2 供电（可能需要 5V + 3.3V）
 ├─ 波特率过高 → 降为 115200
-├─ make flash 多次超时 → 尝试 ISP 模式 (make eflash, mode="isp")
-├─ 芯片擦除后 → 必须用 ISP 模式 (make eflash)
+├─ ISP 握手失败 → 确认 BOOT (GPIO8) 已接 FK-01 BOOT 引脚，RST 接 CHIP_EN
 └─ 手动验证：按住 BOOT 按键 + 按 RESET，看串口是否有 bootloader 输出
 ```

@@ -36,7 +36,6 @@ flash(
 | 参数 | BL616 | BL618 |
 |------|-------|-------|
 | baud_rate | 921600（FlashKey 上限） | 921600（FlashKey 上限） |
-| mode | isp | isp |
 | SDK | bouffalo_sdk | bouffalo_sdk |
 | make args | `CHIP=bl616 COMX={port} BAUDRATE={baud}` | `CHIP=bl618 COMX={port} BAUDRATE={baud}` |
 

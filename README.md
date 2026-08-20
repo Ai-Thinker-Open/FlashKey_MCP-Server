@@ -331,12 +331,11 @@ still overwrites the temporary `flashkey://log`; historical archives are not aff
 - For normal flashing call only `flash(firmware_path, chip, flash_port)`; custom flash
   commands (e.g. `make eflash`) go through the `tool` parameter (supports `{port}`/`{baud}`/
   `{firmware}`/`{chip}` placeholders) — no extra low-level tool is needed.
-- `chip="ai-wb2"` defaults to **break** / `baud_rate=921600` (`make flash`): serial-break
-  flashing writes only the App, not boot2; if the firmware does not support serial break or
-  the chip was erased with `make erase_flash`, use `mode="isp"` + `make eflash`
-  (full flash incl. boot2, BOOT↑ + RST enters ISP).
-- `chip="ai-m62"` uses **isp** mode with `baud_rate=921600` (FlashKey's own serial port
-  supports at most 921600; 2000000 requires an external USB-UART).
+- `chip="ai-wb2"` and `chip="ai-m62"` both use **isp** mode with `baud_rate=921600`
+  (BOOT↑ + RST enters ISP; FlashKey's own serial port supports at most 921600;
+  2000000 requires an external USB-UART). Ai-WB2 runs `make eflash` — a **full flash
+  incl. boot2**, which also works after `make erase_flash` or when the firmware
+  does not support serial break. The old serial-break (`break`) mode has been removed.
 - Verify after flashing: open `log_open()` first, **then `rst_pulse()` to reboot the module**
   so the full boot log is captured, then `log_close()`, read `flashkey://log` and **analyze
   it yourself to decide whether the boot is healthy** (investigate anomalies instead of just

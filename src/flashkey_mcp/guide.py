@@ -188,20 +188,15 @@ FLASH_GUIDE_DOC = """\
 
 | chip | mode | 默认 baud_rate | 烧录命令 |
 | --- | --- | --- | --- |
-| Ai-WB2 | break（默认） | 921600 | `make flash p=<port> b=<baud>`：串口打断，只烧 App，不含 boot2 |
 | Ai-WB2 | isp | 921600 | `make eflash p=<port> b=<baud>`：需 BOOT↑ + RST 进入 ISP，全量含 boot2 |
 | Ai-M62 | isp | 921600（FlashKey 串口上限） | `make flash`（SDK 内按 Ai-M62 对应芯片传 CHIP）：BOOT↑ + RST 进入 ISP；2000000 仅在外接 USB-UART 时可用 |
 
-### Ai-WB2 两种模式
+### ISP 烧录模式（唯一烧录方式）
 
-1. **串口打断烧录（break，默认）**：`make flash` 启动后会等待模组复位，
-   工具自动触发一次 FK-01 RST 复位脉冲（检测到复位提示或短延时后触发，
-   不依赖解析提示文本），模组重启后即可触发烧录。该模式只烧录 App
-   应用程序，**不烧录 boot2**；如果无法触发烧录，说明固件不支持串口打断，
-   应改用 ISP 模式。
-2. **ISP 烧录（isp）**：芯片级烧录模式，需要芯片先进入 boot 烧录模式。
-   FlashKey 拉高 BOOT 后发送复位脉冲即可进入 ISP 模式，之后执行 `make eflash`。
-   该模式**全量烧录（含 boot2）**；执行过 `make erase_flash` 擦除芯片后必须使用 ISP 模式。
+芯片级烧录模式，需要芯片先进入 boot 烧录模式。
+FlashKey 拉高 BOOT 后发送复位脉冲即可进入 ISP 模式，之后执行 `make eflash`（Ai-WB2）。
+该模式**全量烧录（含 boot2）**；执行过 `make erase_flash` 擦除芯片后同样使用 ISP 模式。
+（串口打断 break 模式已移除，不再支持。）
 
 ## 正确顺序
 
@@ -257,8 +252,7 @@ _INSTRUCTIONS = (
     "禁硬编码/猜端口名（/dev/ttyACM0、COM3）与 fk_control。"
     "status 确认已认证，未认证先密钥认证。"
     "烧录只用 flash（firmware_path、chip、flash_port），"
-    "Ai-WB2 默认 break/921600，可 isp（make eflash 全量含 boot2）；"
-    "Ai-M62 默认 isp/921600（FlashKey 串口上限）。"
+    "Ai-WB2 与 Ai-M62 统一 isp 模式（BOOT↑+RST 进 ISP；Ai-WB2 用 make eflash 全量含 boot2）/921600。"
     "烧后验证：log_open 后先 rst_pulse 复位采完整启动日志，再 log_close 并自行分析；或 AT+GMR。"
     "日志采集用 log_open(project=...)，close 自动归档 flashkey://logs/{project}（10 份/项目）。"
     "错误见 error-codes；设备掉线先 recover(reattach=True)。"
@@ -274,7 +268,6 @@ def _prompt_flash_firmware(
     chip: str,
     firmware_path: str,
     flash_port: str = "",
-    mode: str = "",
     baud_rate: int = 0,
     flash_dir: str = "",
     tool: str = "",
@@ -282,36 +275,19 @@ def _prompt_flash_firmware(
     """按正确顺序输出烧录步骤（端口 → 认证 → 烧录 → 验证）。"""
     chip_key = normalize_chip(chip)
     module_name = MODULE_NAMES.get(chip_key, chip_key or "未知")
+    default_baud = 921600
     if chip_key == "bl602":
-        default_mode = "break"
-        default_baud = 921600
-        selected_mode = (mode or default_mode).lower()
-        if selected_mode == "isp":
-            chip_note = (
-                f"{module_name} ISP 模式（make eflash）：全量烧录（含 boot2）。"
-                "工具会自动 BOOT↑ + RST 脉冲让模组进入 ISP 模式后再执行 eflash。"
-                "固件不支持串口打断或执行过 make erase_flash 后必须用此模式。"
-            )
-        else:
-            selected_mode = "break"
-            chip_note = (
-                f"{module_name} 串口打断模式（默认，make flash）：只烧录 App，不烧 boot2。"
-                "工具启动后自动触发一次 FK-01 RST 复位脉冲（检测到复位提示或短延时后，"
-                "不依赖解析提示文本）；"
-                "若无法触发，说明固件不支持串口打断，请改用 mode=\"isp\"（make eflash）。"
-            )
+        chip_note = (
+            f"{module_name} 使用 ISP 模式（make eflash）：全量烧录（含 boot2）。"
+            "工具会自动 BOOT↑ + RST 脉冲让模组进入 ISP 模式后再执行 eflash；"
+            "执行过 make erase_flash 擦除芯片后同样使用此模式。"
+        )
     elif chip_key in ("bl616", "bl618"):
-        default_mode = "isp"
-        default_baud = 921600
-        selected_mode = mode or default_mode
         chip_note = (
             f"{module_name} 使用 isp 模式，默认 921600（FlashKey 串口最高仅支持 921600；"
             f"2000000 需外接 USB-UART）；flash_dir 指向烧录工程目录。"
         )
     else:
-        default_mode = "isp"
-        default_baud = 921600
-        selected_mode = mode or default_mode
         chip_note = "仅支持 Ai-WB2 / Ai-M62，请确认 chip 参数。"
 
     selected_baud = baud_rate or default_baud
@@ -329,7 +305,7 @@ def _prompt_flash_firmware(
         extra += f"\n  - flash_dir: {flash_dir}"
     if tool:
         extra += f"\n  - tool（自定义命令）: {tool}"
-    elif chip_key == "bl602" and selected_mode == "isp":
+    elif chip_key == "bl602":
         sdk_display = flash_dir or "<flash_dir>"
         extra += (
             f"\n  - tool（ISP 烧录命令，make eflash）: "
@@ -343,7 +319,7 @@ def _prompt_flash_firmware(
         f"2. 调用 status() 确认设备已连接且 authed=true；"
         f"未认证先完成密钥认证（SET_KEY / flashkey_auth）。\n"
         f"3. 调用 flash(firmware_path=\"{firmware_path}\", chip=\"{chip_arg}\", "
-        f"flash_port=\"{port_display}\", baud_rate={selected_baud}, mode=\"{selected_mode}\")"
+        f"flash_port=\"{port_display}\", baud_rate={selected_baud})"
         f"{extra}\n"
         f"   - {chip_note}\n"
         f"4. 烧录完成后验证：先 log_open(port=\"{port_display}\", baud_rate=115200) "
@@ -448,10 +424,6 @@ def register_prompts(mcp: Any) -> None:
             arguments=[
                 PromptArgument(name="chip", description="模组名称：Ai-WB2 / Ai-M62", required=True),
                 PromptArgument(name="firmware_path", description="固件文件绝对路径", required=True),
-                PromptArgument(
-                    name="mode",
-                    description="可选；Ai-WB2：break（默认）/isp；Ai-M62：isp",
-                ),
             ],
             fn=_prompt_flash_firmware,
         )

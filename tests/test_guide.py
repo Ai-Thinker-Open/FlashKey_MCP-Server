@@ -31,7 +31,7 @@ def test_error_guide_covers_all_error_codes() -> None:
 
 
 def test_flash_firmware_prompt_bl602() -> None:
-    """flash-firmware for Ai-WB2 (default break) must include serial-break flow."""
+    """flash-firmware for Ai-WB2 (default isp) must recommend make eflash flow."""
     messages = guide._prompt_flash_firmware(
         chip="ai-wb2",
         firmware_path="/tmp/fw.bin",
@@ -47,23 +47,25 @@ def test_flash_firmware_prompt_bl602() -> None:
     assert "log_open" in assistant
     assert "log_close" in assistant
     assert "flashkey://log" in assistant
-    assert "RST 复位脉冲" in assistant
-    assert "不依赖解析提示文本" in assistant
+    assert "RST 脉冲" in assistant
+    assert "ISP" in assistant
+    assert "make eflash" in assistant
     assert "boot2" in assistant
     assert "rst_pulse" in assistant
+    # 已移除 mode 参数与 break 串口打断模式，不应再出现
+    assert "mode=" not in assistant
+    assert "break" not in assistant
 
 
-def test_flash_firmware_prompt_bl602_isp() -> None:
-    """Ai-WB2 mode=isp must recommend make eflash and boot2/erase guidance."""
+def test_flash_firmware_prompt_bl602_flash_dir() -> None:
+    """Ai-WB2 with flash_dir must include make eflash tool hint and erase guidance."""
     messages = guide._prompt_flash_firmware(
         chip="ai-wb2",
         firmware_path="/tmp/fw.bin",
-        mode="isp",
         flash_dir="/opt/wb2/app",
     )
     assistant = messages[1].content.text
     assert 'chip="ai-wb2"' in assistant
-    assert "mode=\"isp\"" in assistant
     assert "make eflash" in assistant
     assert "boot2" in assistant
     assert "erase_flash" in assistant
@@ -80,7 +82,6 @@ def test_flash_firmware_prompt_ai_m62_baud_cap() -> None:
     )
     assistant = messages[1].content.text
     assert 'chip="ai-m62"' in assistant
-    assert "mode=\"isp\"" in assistant
     assert "921600" in assistant
     assert "上限" in assistant or "921600" in assistant
     assert "2000000" in assistant  # 提示 2000000 需外接 USB-UART

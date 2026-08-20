@@ -277,7 +277,7 @@ firmware_flash(confirm=True)
 
 | 模组 | 芯片 | 子 skill | 烧录方式 |
 |------|------|---------|---------|
-| Ai-WB2 | BL602 | `flashkey-mcp-ai-wb2` | 串口打断 |
+| Ai-WB2 | BL602 | `flashkey-mcp-ai-wb2` | ISP 模式（make eflash 全量含 boot2） |
 | Ai-M61/M62 | BL616/BL618 | `flashkey-mcp-ai-m61-m62` | ISP 模式 |
 
 ---
