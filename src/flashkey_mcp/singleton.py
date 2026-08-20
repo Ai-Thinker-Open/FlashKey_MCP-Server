@@ -6,20 +6,25 @@ otherwise race to open the same FK-01 USB serial port: Linux allows repeated
 their HELLO/CHALLENGE frames interleave, breaking the handshake and leaving
 the device LED blinking forever.
 
-This module provides a process-wide (``flock``-based) lock.  The first process
-to acquire it owns the device; other processes wait and retry instead of
-opening the port.  Within one process the lock is reference-counted so that
-multiple ``DeviceManager`` instances (e.g. in tests) share it safely.
+This module provides a process-wide file lock (``flock`` on POSIX and
+``msvcrt.locking`` on Windows).  The first process to acquire it owns the
+device; other processes wait and retry instead of opening the port.  Within one
+process the lock is reference-counted so that multiple ``DeviceManager``
+instances (e.g. in tests) share it safely.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import tempfile
 
 logger = logging.getLogger(__name__)
 
-_LOCK_PATH = os.environ.get("FLASHKEY_LOCK_PATH", "/tmp/flashkey-mcp.lock")
+_LOCK_PATH = os.environ.get(
+    "FLASHKEY_LOCK_PATH",
+    os.path.join(tempfile.gettempdir(), "flashkey-mcp.lock"),
+)
 
 _held = False
 _count = 0
@@ -30,8 +35,8 @@ def acquire() -> bool:
     """Try to take the single-instance lock (non-blocking).
 
     Returns:
-        ``True`` if this process owns the device (or no lock is available on
-        this platform), ``False`` if another flashkey-mcp instance holds it.
+        ``True`` if this process owns the device, ``False`` if another
+        flashkey-mcp instance holds it.
     """
     global _held, _count, _fd
 
@@ -39,28 +44,37 @@ def acquire() -> bool:
         _count += 1
         return True
 
+    fd = -1
     try:
-        import fcntl
-    except ImportError:
-        # 非 POSIX 平台（Windows）：无进程级锁，保持原行为
-        _held = True
-        _count = 1
-        return True
+        open_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0)
+        fd = os.open(_LOCK_PATH, open_flags, 0o644)
+        if os.name == "nt":
+            import msvcrt
 
-    try:
-        fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        try:
-            os.close(fd)  # type: ignore[possibly-undefined]
-        except OSError:
-            pass
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         logger.info("另一 flashkey-mcp 实例已持有设备锁，等待其释放...")
         return False
 
     # 记录持有者 PID，便于排查
     try:
-        os.ftruncate(fd, 0)
+        if os.name == "nt":
+            os.lseek(fd, 1, os.SEEK_SET)
+            os.ftruncate(fd, 1)
+        else:
+            os.ftruncate(fd, 0)
         os.write(fd, str(os.getpid()).encode("ascii"))
     except OSError:
         pass
@@ -84,9 +98,15 @@ def release() -> None:
 
     if _fd >= 0:
         try:
-            import fcntl
+            if os.name == "nt":
+                import msvcrt
 
-            fcntl.flock(_fd, fcntl.LOCK_UN)
+                os.lseek(_fd, 0, os.SEEK_SET)
+                msvcrt.locking(_fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(_fd, fcntl.LOCK_UN)
         except Exception:
             pass
         try:

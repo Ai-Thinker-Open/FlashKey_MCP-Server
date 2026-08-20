@@ -13,13 +13,12 @@ Covers:
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
-import select
+import queue
 import subprocess
 import sys
-import time
+import threading
 
 # ── Path setup ──────────────────────────────────────────────────────────
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -89,7 +88,7 @@ def _fail(msg: str) -> None:
 def _build_env() -> dict[str, str]:
     """Return an env dict with PYTHONPATH set to include the src dir."""
     env = os.environ.copy()
-    env["PYTHONPATH"] = SRC_DIR + ":" + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
     return env
 
 
@@ -108,60 +107,40 @@ def start_server() -> subprocess.Popen:
 
 def _read_line(proc: subprocess.Popen, timeout: float = 5.0) -> str:
     """Read one line from the server's stdout with a timeout."""
-    fd = proc.stdout.fileno()
-    # Set stdout pipe to non-blocking so select works reliably
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    output_queue = getattr(proc, "_flashkey_stdout_queue", None)
+    if output_queue is None:
+        output_queue = queue.Queue()
+        proc._flashkey_stdout_queue = output_queue
 
-    deadline = time.monotonic() + timeout
-    buf = b""
-    while time.monotonic() < deadline:
-        # Check if process died
-        if proc.poll() is not None:
-            remaining = time.monotonic()
-            stderr_text = ""
+        def _pump_stdout() -> None:
             try:
-                stderr_text = proc.stderr.read(4096).decode(errors="replace")
-            except Exception:
-                pass
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    output_queue.put(line)
+            finally:
+                output_queue.put(None)
+
+        threading.Thread(target=_pump_stdout, daemon=True).start()
+
+    try:
+        line = output_queue.get(timeout=timeout)
+    except queue.Empty as exc:
+        if proc.poll() is not None:
+            stderr_text = proc.stderr.read(4096).decode(errors="replace")
             raise RuntimeError(
                 f"Server exited prematurely (code={proc.returncode}). "
                 f"stderr={stderr_text!r}"
-            )
+            ) from exc
+        raise TimeoutError(f"No response within {timeout}s") from exc
 
-        # Use select to wait for data with a short timeout
-        rlist, _, _ = select.select([proc.stdout], [], [], 0.1)
-        if not rlist:
-            continue
-
-        try:
-            chunk = os.read(fd, 4096)
-        except (BlockingIOError, OSError):
-            time.sleep(0.01)
-            continue
-
-        if not chunk:
-            time.sleep(0.01)
-            continue
-
-        buf += chunk
-        if b"\n" in buf:
-            line, rest = buf.split(b"\n", 1)
-            # Put back any extra bytes after first line
-            # (we assume single-message-per-response for our protocol)
-            return line.decode("utf-8")
-
-    # Timeout — grab whatever we have for diagnostics
-    remaining = time.monotonic()
-    stderr_text = ""
-    try:
+    if line is None:
         stderr_text = proc.stderr.read(4096).decode(errors="replace")
-    except Exception:
-        pass
-    raise TimeoutError(
-        f"No response within {timeout}s. "
-        f"buf={buf!r} stderr={stderr_text!r}"
-    )
+        raise RuntimeError(
+            f"Server stdout closed (code={proc.poll()}). stderr={stderr_text!r}"
+        )
+    return line.rstrip(b"\r\n").decode("utf-8")
 
 
 def send_request(

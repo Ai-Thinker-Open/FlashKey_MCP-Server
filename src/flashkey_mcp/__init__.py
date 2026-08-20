@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 from flashkey_mcp._guard import _require_mcp_runtime
 from flashkey_mcp.transport import FlashKeyTransport, find_port, list_all_ports

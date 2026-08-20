@@ -11,6 +11,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -93,6 +94,15 @@ def test_bl616_resolves_make_flash():
 
 # ── Test 3: ISP flow — enter bootloader, run tool, recover ──────────────
 
+def _write_flash_tool_script(content: str) -> str:
+    """Write a cross-platform Python flash-tool double and return its path."""
+    fd, path = tempfile.mkstemp(suffix=".py", prefix="flash_tool_")
+    os.close(fd)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(textwrap.dedent(content))
+    return path
+
+
 def test_tool_flash_isp_flow():
     """ISP flow: BOOT↑ + RST pulse → flash tool → recovery (RST + BOOT↓)."""
     from flashkey_mcp.server import _tool_flash
@@ -101,21 +111,29 @@ def test_tool_flash_isp_flow():
     dm = MagicMock()
     dm.fk = fk
 
-    with tempfile.NamedTemporaryFile("w", suffix=".bin", delete=False) as fw:
-        fw.write("fake firmware")
-        fw_path = fw.name
+    # Cross-platform flash-tool double: exits 0 immediately (Python, no bash)
+    script = _write_flash_tool_script("""\
+import sys
+sys.exit(0)
+""")
     try:
-        with patch("flashkey_mcp.server._require_fk", return_value=(dm, fk)), \
-             patch("flashkey_mcp.server._resolve_flash_tool", return_value=["true"]), \
-             patch("flashkey_mcp.server._validate_flash_port"), \
-             patch("flashkey_mcp.server._validate_baud_for_port"):
-            result = asyncio.run(_tool_flash(
-                firmware_path=fw_path,
-                flash_port="/dev/ttyUSB0",
-                chip="ai-wb2",
-            ))
+        with tempfile.NamedTemporaryFile("w", suffix=".bin", delete=False) as fw:
+            fw.write("fake firmware")
+            fw_path = fw.name
+        try:
+            with patch("flashkey_mcp.server._require_fk", return_value=(dm, fk)), \
+                 patch("flashkey_mcp.server._resolve_flash_tool", return_value=[sys.executable, script]), \
+                 patch("flashkey_mcp.server._validate_flash_port"), \
+                 patch("flashkey_mcp.server._validate_baud_for_port"):
+                result = asyncio.run(_tool_flash(
+                    firmware_path=fw_path,
+                    flash_port="/dev/ttyUSB0",
+                    chip="ai-wb2",
+                ))
+        finally:
+            os.unlink(fw_path)
     finally:
-        os.unlink(fw_path)
+        os.unlink(script)
 
     assert result["success"] is True, f"Expected success, got {result}"
     assert result["mode"] == "isp", f"Expected mode=isp, got {result}"
