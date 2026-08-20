@@ -1,8 +1,9 @@
+[![中文](https://img.shields.io/badge/中文-README-blue)](README.zh.md)
+
 <h1 align="center">FlashKey MCP Server</h1>
 
 > FlashKey FK-01 MCP Server — a universal USB flashing & debugging tool for any MCP-compatible AI assistant.
 
-[![简体中文|README](https://img.shields.io/badge/简体中文-README-brightgreen)](README.zh.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
@@ -19,6 +20,8 @@ FlashKey FK-01 is a dual-chip USB flashing and debugging adapter from Ai-Thinker
 Automatic handshake within 5 seconds after plugging in the FK-01; `status()` provides unified status without authentication, ready to use out of the box.
 
 > Source repository: [Ai-Thinker-Open/FlashKey_MCP-Server](https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server)
+
+Technical reference: [code entry](docs/CODE_ENTRY.md) · [architecture](docs/ARCHITECTURE.md) · [validation record](docs/VALIDATION.md)
 
 ---
 
