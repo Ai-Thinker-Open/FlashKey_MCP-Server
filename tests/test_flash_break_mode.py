@@ -38,12 +38,11 @@ def _make_mock_fk():
 
 
 def _write_tool_script(content: str) -> str:
-    """Write a shell script to a temp file and return its path."""
-    fd, path = tempfile.mkstemp(suffix=".sh", prefix="flash_tool_")
+    """Write a cross-platform Python flash-tool double and return its path."""
+    fd, path = tempfile.mkstemp(suffix=".py", prefix="flash_tool_")
     os.close(fd)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(textwrap.dedent(content))
-    os.chmod(path, 0o755)
     return path
 
 
@@ -56,15 +55,14 @@ def test_break_mode_detects_prompt_and_pulses_rst():
     fk = _make_mock_fk()
 
     script = _write_tool_script(r"""
-        #!/bin/bash
-echo "Bouffalo Lab Dev Cube"
-echo "Please Press Reset"
-sleep 0.5
-echo "Flashing done"
-exit 0
+import time
+print("Bouffalo Lab Dev Cube", flush=True)
+print("Please Press Reset", flush=True)
+time.sleep(0.5)
+print("Flashing done", flush=True)
 """)
     try:
-        cmd = ["bash", script]
+        cmd = [sys.executable, script]
         success, lines = _flash_break_mode(fk, cmd, "", flash_timeout=10)
     finally:
         os.unlink(script)
@@ -87,13 +85,12 @@ def test_break_mode_timeout_when_no_prompt():
 
     # Script that sleeps forever without printing prompt
     script = _write_tool_script(r"""
-        #!/bin/bash
-echo "Starting..."
-sleep 60
-exit 0
+import time
+print("Starting...", flush=True)
+time.sleep(60)
 """)
     try:
-        cmd = ["bash", script]
+        cmd = [sys.executable, script]
         # Patch the RST trigger delay to 0.2s for test speed
         with patch("flashkey_mcp.server._BREAK_RST_DELAY_S", 0.2):
             success, lines = _flash_break_mode(fk, cmd, "", flash_timeout=10)
@@ -118,12 +115,12 @@ def test_break_mode_process_fails_before_prompt():
     fk = _make_mock_fk()
 
     script = _write_tool_script(r"""
-        #!/bin/bash
-echo "Error: chip not found"
-exit 1
+import sys
+print("Error: chip not found", flush=True)
+sys.exit(1)
 """)
     try:
-        cmd = ["bash", script]
+        cmd = [sys.executable, script]
         success, lines = _flash_break_mode(fk, cmd, "", flash_timeout=10)
     finally:
         os.unlink(script)
@@ -214,15 +211,14 @@ def test_break_mode_progress_cb_stages():
 
     fk = _make_mock_fk()
     script = _write_tool_script(r"""
-        #!/bin/bash
-echo "Please Press Reset"
-sleep 0.5
-echo "Flashing done"
-exit 0
+import time
+print("Please Press Reset", flush=True)
+time.sleep(0.5)
+print("Flashing done", flush=True)
 """)
     stages = []
     try:
-        cmd = ["bash", script]
+        cmd = [sys.executable, script]
         success, _ = _flash_break_mode(
             fk, cmd, "", flash_timeout=10,
             progress_cb=lambda pct, msg: stages.append((pct, msg)),
@@ -247,14 +243,13 @@ def test_break_mode_progress_cb_errors_ignored():
 
     fk = _make_mock_fk()
     script = _write_tool_script(r"""
-        #!/bin/bash
-echo "Please Press Reset"
-sleep 0.2
-echo "done"
-exit 0
+import time
+print("Please Press Reset", flush=True)
+time.sleep(0.2)
+print("done", flush=True)
 """)
     try:
-        cmd = ["bash", script]
+        cmd = [sys.executable, script]
         success, _ = _flash_break_mode(
             fk, cmd, "", flash_timeout=10,
             progress_cb=lambda pct, msg: (_ for _ in ()).throw(RuntimeError("boom")),
@@ -276,14 +271,13 @@ def test_break_mode_pulses_rst_without_prompt():
     fk = _make_mock_fk()
     # Tool that never prints a reset prompt but exits successfully after a moment
     script = _write_tool_script(r"""
-        #!/bin/bash
-echo "starting sync..."
-sleep 0.3
-echo "write ok"
-exit 0
+import time
+print("starting sync...", flush=True)
+time.sleep(0.3)
+print("write ok", flush=True)
 """)
     try:
-        cmd = ["bash", script]
+        cmd = [sys.executable, script]
         with patch("flashkey_mcp.server._BREAK_RST_DELAY_S", 0.1):
             success, lines = _flash_break_mode(fk, cmd, "", flash_timeout=10)
     finally:
@@ -304,15 +298,14 @@ def test_break_mode_detects_chinese_prompt():
     fk = _make_mock_fk()
 
     script = _write_tool_script(r"""
-        #!/bin/bash
-echo "正在启动烧录工具..."
-echo "请复位设备，或按复位键"
-sleep 0.5
-echo "烧录完成"
-exit 0
+import time
+print("正在启动烧录工具...", flush=True)
+print("请复位设备，或按复位键", flush=True)
+time.sleep(0.5)
+print("烧录完成", flush=True)
 """)
     try:
-        cmd = ["bash", script]
+        cmd = [sys.executable, script]
         success, lines = _flash_break_mode(fk, cmd, "", flash_timeout=10)
     finally:
         os.unlink(script)

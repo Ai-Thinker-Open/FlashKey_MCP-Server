@@ -1,8 +1,9 @@
+[![English](https://img.shields.io/badge/English-README-green)](README.md)
+
 <h1 align="center">FlashKey MCP Server</h1>
 
 > FlashKey FK-01 MCP 服务器 — 通用 USB 烧录调试器，支持任何 MCP 兼容的 AI 工具。
 
-[![English|README](https://img.shields.io/badge/English-README-blue)](README.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
@@ -19,6 +20,8 @@ FlashKey FK-01 是安信可（Ai-Thinker）推出的双芯片 USB 烧录调试�
 插入 FK-01 后自动握手，5 秒内完成；`status()` 统一状态查询无需认证，开箱即用。
 
 > 源码仓库：[Ai-Thinker-Open/FlashKey_MCP-Server](https://github.com/Ai-Thinker-Open/FlashKey_MCP-Server)
+
+技术资料：[代码入口](docs/CODE_ENTRY.zh.md) · [架构说明](docs/ARCHITECTURE.zh.md) · [验证记录](docs/VALIDATION.zh.md)
 
 ---
 
